@@ -1,0 +1,76 @@
+#!/bin/bash
+
+# Fonction pour afficher l'aide
+show_help() {
+  echo "Usage: $0 '<regex_fichiers>' 'EXIF_NAME=nouvelle_valeur' [--dry-run]"
+  echo ""
+  echo "Script pour modifier une métadonnée EXIF spécifique pour tous les fichiers correspondant à une regex dans le dossier courant."
+  echo ""
+  echo "Arguments :"
+  echo "  <regex_fichiers>    Expression régulière pour filtrer les fichiers dans le dossier actuel."
+  echo "  EXIF_NAME=valeur    Nom de la variable EXIF à modifier et la nouvelle valeur à définir."
+  echo ""
+  echo "Options :"
+  echo "  -h, --help          Afficher cette aide et quitter."
+  echo "  --dry-run           Afficher les modifications qui seraient effectuées sans modifier les fichiers."
+  echo ""
+  echo "Exemple :"
+  echo "  $0 '.*\.jpg' 'Author=John Doe' --dry-run"
+  echo "  $0 '.*\.jpg' 'Camera=Robot Royal 36'"
+  echo "  $0 '.*\.jpg' 'Album=Mon Album'"
+  echo "  $0 '.*\.jpg' 'Subject=Mon Album'"
+  echo ""
+  echo "Ce script nécessite 'exiftool' pour fonctionner."
+}
+
+# Vérification de l'option d'aide
+if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+  show_help
+  exit 0
+fi
+
+# Vérification de la présence d'arguments
+if [ "$#" -lt 2 ]; then
+  echo "Erreur : nombre d'arguments incorrect."
+  show_help
+  exit 1
+fi
+
+# Assignation des paramètres à des variables
+file_regex=$1
+exif_data=$2
+dry_run=false
+
+# Vérification de l'option --dry-run
+if [[ "$3" == "--dry-run" ]]; then
+  dry_run=true
+fi
+
+# Séparation du nom EXIF et de la nouvelle valeur
+exif_name=$(echo "$exif_data" | cut -d'=' -f1)
+new_value=$(echo "$exif_data" | cut -d'=' -f2)
+
+# Vérification que exiftool est installé
+if ! command -v exiftool &> /dev/null; then
+  echo "ExifTool n'est pas installé. Installez-le et réessayez."
+  exit 1
+fi
+
+echo -e "Mise à jour du tag EXIF: \e[34m$exif_name\e[0m"
+
+# Application de la modification ou affichage en mode dry-run
+for file in *; do
+  if [[ $file =~ $file_regex ]]; then
+    # Récupération de la valeur actuelle du tag
+    current_value=$(exiftool -s3 -"$exif_name" "$file")
+
+    if [ "$dry_run" = true ]; then
+      echo -e "$file : '\e[31m$current_value\e[0m' -> '\e[32m$new_value\e[0m'"
+    else
+      echo "Modification de $file : $exif_name=$new_value"
+      exiftool -overwrite_original -"$exif_name"="$new_value" "$file"
+    fi
+  fi
+done
+
+echo -e '\e[32mOpération terminée.\e[0m'
