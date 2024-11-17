@@ -1,0 +1,160 @@
+#!/bin/bash
+
+# Fonction pour afficher l'aide
+display_help() {
+  echo "Usage: $0 source=<source_path> destination=<destination_path> [--dry-run] [--clear-cache]"
+  echo
+  echo "Options:"
+  echo "  source=<source_path>             Spécifie le chemin du dossier source contenant les fichiers."
+  echo "  destination=<destination_path>   Spécifie le chemin du dossier de destination pour organiser les fichiers."
+  echo "  --dry-run                        Affiche les chemins cibles sans copier les fichiers."
+  echo "  --clear-cache                    Vide le cache de MapQuest en supprimant ~/.config/EXIF_tools/map_quest_cache.json."
+  echo "  --help                           Affiche cette aide."
+  exit 0
+}
+
+# Variables de chemins de fichiers
+CONFIG_FILE="$HOME/.config/EXIF_tools/config.ini"
+CACHE_FILE="$HOME/.config/EXIF_tools/map_quest_cache.json"
+
+# Lire les options de la ligne de commande
+for arg in "$@"; do
+  case $arg in
+    source=*)
+      SOURCE_DIR="${arg#*=}"
+      shift
+      ;;
+    destination=*)
+      TARGET_BASE_DIR="${arg#*=}"
+      shift
+      ;;
+    --dry-run)
+      DRY_RUN=true
+      shift
+      ;;
+    --clear-cache)
+      rm -f "$CACHE_FILE"
+      echo "Cache de MapQuest supprimé."
+      exit 0
+      ;;
+    --help)
+      display_help
+      ;;
+    *)
+      echo "Option inconnue : $arg"
+      exit 1
+      ;;
+  esac
+done
+
+# Vérifier que les dossiers source et destination sont définis
+if [ -z "$SOURCE_DIR" ] || [ -z "$TARGET_BASE_DIR" ]; then
+  echo "Erreur : vous devez spécifier les dossiers source et destination."
+  display_help
+fi
+
+# Lire le fichier de configuration
+if [ ! -f "$CONFIG_FILE" ]; then
+  echo "Erreur : fichier de configuration $CONFIG_FILE introuvable."
+  exit 1
+fi
+
+# Extraire les valeurs de configuration
+MAPQUEST_API_KEY=$(awk -F "=" '/^key/ {print $2}' "$CONFIG_FILE" | xargs)
+PREFER_ENGLISH_NAMES=$(awk -F "=" '/^prefer_english_names/ {print $2}' "$CONFIG_FILE" | xargs)
+LOCATION_FORMAT=$(awk -F "=" '/^location/ {print $2}' "$CONFIG_FILE" | xargs)
+DATE_FORMAT=$(awk -F "=" '/^date/ {print $2}' "$CONFIG_FILE" | xargs)
+
+# Vérifier si la clé API a été chargée
+if [ -z "$MAPQUEST_API_KEY" ]; then
+  echo "Erreur : la clé API de MapQuest n'est pas définie dans $CONFIG_FILE."
+  exit 1
+fi
+
+# Créer le dossier cible si nécessaire
+mkdir -p "$TARGET_BASE_DIR"
+
+# Charger le cache, ou initialiser s'il n'existe pas
+mkdir -p "$(dirname "$CACHE_FILE")"
+if [ -f "$CACHE_FILE" ]; then
+  CACHE=$(<"$CACHE_FILE")
+else
+  CACHE="{}"
+fi
+
+# Fonction pour mettre à jour le cache
+update_cache() {
+  echo "$CACHE" | jq ". + {\"$1\": \"$2\"}" > "$CACHE_FILE"
+}
+
+# Fonction pour obtenir la localisation via MapQuest API (avec cache)
+get_location_from_mapquest() {
+  LAT=$1
+  LON=$2
+
+    # Vérifier si les coordonnées existent dans le cache
+    COORD_KEY="${LAT},${LON}"
+    LOCATION=$(echo "$CACHE" | jq -r ".[\"$COORD_KEY\"]")
+
+    if [ "$LOCATION" != "null" ]; then
+      echo "$LOCATION"
+      return
+    fi
+
+    # Appeler l'API de MapQuest si le résultat n'est pas en cache
+    LANGUAGE="fr"
+    if [ "$PREFER_ENGLISH_NAMES" = "True" ]; then
+      LANGUAGE="en"
+    fi
+
+    LOCATION=$(curl -s "https://www.mapquestapi.com/geocoding/v1/reverse?key=$MAPQUEST_API_KEY&location=$LAT,$LON&outFormat=json&locale=$LANGUAGE" | jq -r '.results[0].locations[0]')
+
+    TOWN=$(echo "$LOCATION" | jq -r '.adminArea5 // ""')
+    CITY=$(echo "$LOCATION" | jq -r '.adminArea4 // ""')
+    STATE=$(echo "$LOCATION" | jq -r '.adminArea3 // ""')
+
+    FORMATTED_LOCATION="$LOCATION_FORMAT"
+    FORMATTED_LOCATION="${FORMATTED_LOCATION//%town/$TOWN}"
+    FORMATTED_LOCATION="${FORMATTED_LOCATION//%city/$CITY}"
+    FORMATTED_LOCATION="${FORMATTED_LOCATION//%state/$STATE}"
+    FORMATTED_LOCATION="${FORMATTED_LOCATION:-UNKNOWN-LOCATION}"
+
+    # Ajouter au cache
+    CACHE=$(echo "$CACHE" | jq ". + {\"$COORD_KEY\": \"$FORMATTED_LOCATION\"}")
+    update_cache "$COORD_KEY" "$FORMATTED_LOCATION"
+
+    echo "$FORMATTED_LOCATION"
+  }
+
+# Parcourir tous les fichiers du dossier source
+find "$SOURCE_DIR" -type f | while read -r FILE; do
+  DATE=$(exiftool -d "$DATE_FORMAT" -DateTimeOriginal "$FILE" | awk -F': ' '{print $2}')
+  DATE="${DATE:-UNKNOWN-DATE}"
+
+  ALBUM=$(exiftool -Album "$FILE" | awk -F': ' '{print $2}')
+
+  LATITUDE=$(exiftool -GPSLatitude "$FILE" | awk -F': ' '{print $2}' | awk '{print $1}')
+  LONGITUDE=$(exiftool -GPSLongitude "$FILE" | awk -F': ' '{print $2}' | awk '{print $1}')
+
+  if [ -n "$ALBUM" ]; then
+    LOCATION="$ALBUM"
+  elif [ -n "$LATITUDE" ] && [ -n "$LONGITUDE" ]; then
+    LOCATION=$(get_location_from_mapquest "$LATITUDE" "$LONGITUDE")
+  else
+    LOCATION="UNKNOWN-LOCATION"
+  fi
+
+  SUBFOLDER="$LOCATION"
+  DEST_DIR="$TARGET_BASE_DIR/$DATE/$SUBFOLDER"
+  FINAL_DEST="$DEST_DIR/$(basename "$FILE")"
+
+  if [ "$DRY_RUN" = true ]; then
+    echo "Dry run: $FILE serait Copié vers $FINAL_DEST"
+  else
+    mkdir -p "$DEST_DIR"
+    echo "Copie de $FILE vers $FINAL_DEST"
+    cp "$FILE" "$FINAL_DEST"
+  fi
+done
+
+echo "Réorganisation terminée."
