@@ -65,8 +65,9 @@ for file in *; do
     current_value=$(exiftool -s3 -"$exif_name" "$file")
 
     if [ "$dry_run" = true ]; then
-      echo -e "$file : '\e[31m$current_value\e[0m' -> '\e[32m$new_value\e[0m'"
+      echo -e "\e[34mDry run\e[0m: $file : '\e[31m$current_value\e[0m' -> '\e[32m$new_value\e[0m'"
     else
+      echo -e "$file : '\e[31m$current_value\e[0m' -> '\e[32m$new_value\e[0m'"
       echo "Modification de $file : $exif_name=$new_value"
       exiftool -overwrite_original -"$exif_name"="$new_value" "$file"
     fi

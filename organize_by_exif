@@ -76,43 +76,47 @@ fi
 # Créer le dossier cible si nécessaire
 mkdir -p "$TARGET_BASE_DIR"
 
-# Charger le cache, ou initialiser s'il n'existe pas
-mkdir -p "$(dirname "$CACHE_FILE")"
-if [ -f "$CACHE_FILE" ]; then
-  CACHE=$(<"$CACHE_FILE")
-else
-  CACHE="{}"
-fi
+load_cache() {
+  # Charger le cache, ou initialiser s'il n'existe pas
+  mkdir -p "$(dirname "$CACHE_FILE")"
+  if [ -f "$CACHE_FILE" ]; then
+    CACHE=$(<"$CACHE_FILE")
+  else
+    CACHE="{}"
+  fi
+}
 
-# Fonction pour mettre à jour le cache
+# Fonction pour mettre à jour le cache sur le disque
 update_cache() {
   CACHE=$(echo "$CACHE" | jq --arg key "$1" --arg value "$2" '. + {($key): $value}')
   echo "$CACHE" > "$CACHE_FILE"
 }
 
+# Fonction de conversion pour les coordonnées GPS en format décimal
 convert_to_decimal() {
-    local dms="$1"
-    local degrees minutes seconds direction
-    degrees=$(echo "$dms" | sed 's/ deg.*//')
-    minutes=$(echo "$dms" | sed 's/.*deg \(.*\)'\'' .*/\1/')
-    seconds=$(echo "$dms" | sed 's/.*'\'' \(.*\)".*/\1/')
-    direction=$(echo "$dms" | sed 's/.*" \(.*\)/\1/')
+  local dms="$1"
+  local degrees minutes seconds direction
+  degrees=$(echo "$dms" | sed 's/ deg.*//')
+  minutes=$(echo "$dms" | sed 's/.*deg \(.*\)'\'' .*/\1/')
+  seconds=$(echo "$dms" | sed 's/.*'\'' \(.*\)".*/\1/')
+  direction=$(echo "$dms" | sed 's/.*" \(.*\)/\1/')
 
-    # Convertir en format décimal
-    decimal=$(echo "$degrees + ($minutes / 60) + ($seconds / 3600)" | bc -l)
+  # Convertir en format décimal avec 3 chiffres après la virugle (pour réduire l'efficacité du cache ~1km)
+  decimal=$(echo "scale=3; $degrees + ($minutes / 60) + ($seconds / 3600)" | bc -l)
 
-    # Si la direction est Sud ou Ouest, rendre la valeur négative
-    if [[ "$direction" == "S" || "$direction" == "W" ]]; then
-        decimal=$(echo "-$decimal" | bc -l)
-    fi
+  # Si la direction est Sud ou Ouest, rendre la valeur négative
+  if [[ "$direction" == "S" || "$direction" == "W" ]]; then
+    decimal=$(echo "-$decimal" | bc -l)
+  fi
 
-    echo "$decimal"
+  echo "$decimal"
 }
 
 # Fonction pour obtenir la localisation via MapQuest API (avec cache)
 get_location_from_mapquest() {
   LAT=$1
   LON=$2
+  load_cache
 
   # Vérifier si les coordonnées existent dans le cache
   COORD_KEY="${LAT},${LON}"
@@ -177,7 +181,8 @@ find "$SOURCE_DIR" -type f | while read -r FILE; do
   FINAL_DEST="$DEST_DIR/$(basename "$FILE")"
 
   if [ "$DRY_RUN" = true ]; then
-    echo "Dry run: $FILE serait copié vers $FINAL_DEST"
+    FINAL_DEST_SHORT="$DATE/$SUBFOLDER/$(basename "$FILE")"
+    echo -e "\e[34mDry run\e[0m: $(basename "$FILE") serait copié vers \e[32m$FINAL_DEST_SHORT\e[0m"
   else
     mkdir -p "$DEST_DIR"
     echo "Copie de $FILE vers $FINAL_DEST"
