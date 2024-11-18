@@ -5,11 +5,11 @@ display_help() {
   echo "Usage: $0 source=<source_path> destination=<destination_path> [--dry-run] [--clear-cache]"
   echo
   echo "Options:"
-  echo "  source=<source_path>             Spécifie le chemin du dossier source contenant les fichiers."
+  echo "  source=<source_path>        Spécifie le chemin du dossier source contenant les fichiers."
   echo "  destination=<destination_path>   Spécifie le chemin du dossier de destination pour organiser les fichiers."
-  echo "  --dry-run                        Affiche les chemins cibles sans copier les fichiers."
-  echo "  --clear-cache                    Vide le cache de MapQuest en supprimant ~/.config/EXIF_tools/map_quest_cache.json."
-  echo "  --help                           Affiche cette aide."
+  echo "  --dry-run                   Affiche les chemins cibles sans copier les fichiers."
+  echo "  --clear-cache               Vide le cache de MapQuest en supprimant ~/.config/EXIF_tools/map_quest_cache.json."
+  echo "  --help                      Affiche cette aide."
   exit 0
 }
 
@@ -22,10 +22,12 @@ for arg in "$@"; do
   case $arg in
     source=*)
       SOURCE_DIR="${arg#*=}"
+      SOURCE_DIR="${SOURCE_DIR/#\~/$HOME}"  # Expansion de ~ vers le répertoire HOME
       shift
       ;;
     destination=*)
       TARGET_BASE_DIR="${arg#*=}"
+      TARGET_BASE_DIR="${TARGET_BASE_DIR/#\~/$HOME}"  # Expansion de ~ vers le répertoire HOME
       shift
       ;;
     --dry-run)
@@ -84,7 +86,27 @@ fi
 
 # Fonction pour mettre à jour le cache
 update_cache() {
-  echo "$CACHE" | jq ". + {\"$1\": \"$2\"}" > "$CACHE_FILE"
+  CACHE=$(echo "$CACHE" | jq --arg key "$1" --arg value "$2" '. + {($key): $value}')
+  echo "$CACHE" > "$CACHE_FILE"
+}
+
+convert_to_decimal() {
+    local dms="$1"
+    local degrees minutes seconds direction
+    degrees=$(echo "$dms" | sed 's/ deg.*//')
+    minutes=$(echo "$dms" | sed 's/.*deg \(.*\)'\'' .*/\1/')
+    seconds=$(echo "$dms" | sed 's/.*'\'' \(.*\)".*/\1/')
+    direction=$(echo "$dms" | sed 's/.*" \(.*\)/\1/')
+
+    # Convertir en format décimal
+    decimal=$(echo "$degrees + ($minutes / 60) + ($seconds / 3600)" | bc -l)
+
+    # Si la direction est Sud ou Ouest, rendre la valeur négative
+    if [[ "$direction" == "S" || "$direction" == "W" ]]; then
+        decimal=$(echo "-$decimal" | bc -l)
+    fi
+
+    echo "$decimal"
 }
 
 # Fonction pour obtenir la localisation via MapQuest API (avec cache)
@@ -92,54 +114,60 @@ get_location_from_mapquest() {
   LAT=$1
   LON=$2
 
-    # Vérifier si les coordonnées existent dans le cache
-    COORD_KEY="${LAT},${LON}"
-    LOCATION=$(echo "$CACHE" | jq -r ".[\"$COORD_KEY\"]")
+  # Vérifier si les coordonnées existent dans le cache
+  COORD_KEY="${LAT},${LON}"
+  LOCATION=$(echo "$CACHE" | jq -r --arg key "$COORD_KEY" '.[$key]')
 
-    if [ "$LOCATION" != "null" ]; then
-      echo "$LOCATION"
-      return
-    fi
+  if [ -n "$LOCATION" ] && [ "$LOCATION" != "null" ]; then
+    echo "$LOCATION"
+    return
+  fi
 
-    # Appeler l'API de MapQuest si le résultat n'est pas en cache
-    LANGUAGE="fr"
-    if [ "$PREFER_ENGLISH_NAMES" = "True" ]; then
-      LANGUAGE="en"
-    fi
+  # Appeler l'API de MapQuest si le résultat n'est pas en cache
+  LANGUAGE="fr"
+  if [ "$PREFER_ENGLISH_NAMES" = "True" ]; then
+    LANGUAGE="en"
+  fi
 
-    LOCATION=$(curl -s "https://www.mapquestapi.com/geocoding/v1/reverse?key=$MAPQUEST_API_KEY&location=$LAT,$LON&outFormat=json&locale=$LANGUAGE" | jq -r '.results[0].locations[0]')
+  COMMAND="https://www.mapquestapi.com/geocoding/v1/reverse?key=$MAPQUEST_API_KEY&location=$LAT,$LON&outFormat=json&locale=$LANGUAGE"
+  LOCATION=$(curl -s $COMMAND | jq -r '.results[0].locations[0]')
 
-    TOWN=$(echo "$LOCATION" | jq -r '.adminArea5 // ""')
-    CITY=$(echo "$LOCATION" | jq -r '.adminArea4 // ""')
-    STATE=$(echo "$LOCATION" | jq -r '.adminArea3 // ""')
+  TOWN=$(echo "$LOCATION" | jq -r '.adminArea5 // ""')
+  CITY=$(echo "$LOCATION" | jq -r '.adminArea4 // ""')
+  STATE=$(echo "$LOCATION" | jq -r '.adminArea3 // ""')
 
-    FORMATTED_LOCATION="$LOCATION_FORMAT"
-    FORMATTED_LOCATION="${FORMATTED_LOCATION//%town/$TOWN}"
-    FORMATTED_LOCATION="${FORMATTED_LOCATION//%city/$CITY}"
-    FORMATTED_LOCATION="${FORMATTED_LOCATION//%state/$STATE}"
-    FORMATTED_LOCATION="${FORMATTED_LOCATION:-UNKNOWN-LOCATION}"
+  FORMATTED_LOCATION="$LOCATION_FORMAT"
+  FORMATTED_LOCATION="${FORMATTED_LOCATION//%town/$TOWN}"
+  FORMATTED_LOCATION="${FORMATTED_LOCATION//%city/$CITY}"
+  FORMATTED_LOCATION="${FORMATTED_LOCATION//%state/$STATE}"
+  FORMATTED_LOCATION="${FORMATTED_LOCATION:-UNKNOWN-LOCATION}"
 
-    # Ajouter au cache
-    CACHE=$(echo "$CACHE" | jq ". + {\"$COORD_KEY\": \"$FORMATTED_LOCATION\"}")
-    update_cache "$COORD_KEY" "$FORMATTED_LOCATION"
+  # Ajouter au cache
+  update_cache "$COORD_KEY" "$FORMATTED_LOCATION"
 
-    echo "$FORMATTED_LOCATION"
-  }
+  echo "$FORMATTED_LOCATION"
+}
 
 # Parcourir tous les fichiers du dossier source
 find "$SOURCE_DIR" -type f | while read -r FILE; do
-  DATE=$(exiftool -d "$DATE_FORMAT" -DateTimeOriginal "$FILE" | awk -F': ' '{print $2}')
+  # Extraire les données EXIF (date et album ou localisation) en utilisant -s3
+  DATE=$(exiftool -d "%Y-%m-%d" -DateTimeOriginal -s3 "$FILE")
   DATE="${DATE:-UNKNOWN-DATE}"
 
-  ALBUM=$(exiftool -Album "$FILE" | awk -F': ' '{print $2}')
+  # Transformer les noms de mois en anglais avec une majuscule
+  DATE=$(LC_ALL=en_EN date -d "$DATE" +"%Y-%m-%B" 2>/dev/null || echo "UNKNOWN-DATE")
 
-  LATITUDE=$(exiftool -GPSLatitude "$FILE" | awk -F': ' '{print $2}' | awk '{print $1}')
-  LONGITUDE=$(exiftool -GPSLongitude "$FILE" | awk -F': ' '{print $2}' | awk '{print $1}')
+  ALBUM=$(exiftool -Album -s3 "$FILE")
+
+  LATITUDE=$(exiftool -GPSLatitude -s3 "$FILE")
+  LONGITUDE=$(exiftool -GPSLongitude -s3 "$FILE")
 
   if [ -n "$ALBUM" ]; then
     LOCATION="$ALBUM"
   elif [ -n "$LATITUDE" ] && [ -n "$LONGITUDE" ]; then
-    LOCATION=$(get_location_from_mapquest "$LATITUDE" "$LONGITUDE")
+    DECIMAL_LATITUDE=$(convert_to_decimal "$LATITUDE")
+    DECIMAL_LONGITUDE=$(convert_to_decimal "$LONGITUDE")
+    LOCATION=$(get_location_from_mapquest "$DECIMAL_LATITUDE" "$DECIMAL_LONGITUDE")
   else
     LOCATION="UNKNOWN-LOCATION"
   fi
@@ -149,7 +177,7 @@ find "$SOURCE_DIR" -type f | while read -r FILE; do
   FINAL_DEST="$DEST_DIR/$(basename "$FILE")"
 
   if [ "$DRY_RUN" = true ]; then
-    echo "Dry run: $FILE serait Copié vers $FINAL_DEST"
+    echo "Dry run: $FILE serait copié vers $FINAL_DEST"
   else
     mkdir -p "$DEST_DIR"
     echo "Copie de $FILE vers $FINAL_DEST"
