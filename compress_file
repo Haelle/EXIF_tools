@@ -1,0 +1,87 @@
+#!/bin/bash
+
+MAX_SIZE_MB=2  # Taille maximale souhaitée en Mo
+INITIAL_QUALITY=90  # Qualité initiale pour les fichiers trop volumineux
+STEP_QUALITY=5  # Réduction de qualité par étape
+MINIMUM_QUALITY=75  # Qualité minimale pour éviter une trop grande perte de qualité
+
+# Fonction pour afficher l'aide
+display_help() {
+    echo "Usage: $0 <path_or_pattern> [--dry-run] [--help]"
+    echo
+    echo "Options:"
+    echo "  <path_or_pattern>    Chemin ou pattern vers les fichiers à optimiser (e.g., './path/to/files/*')."
+    echo "  --dry-run            Affiche les fichiers qui seraient optimisés sans les modifier."
+    echo "  --help               Affiche cette aide."
+    exit 0
+}
+
+# Lire les options de la ligne de commande
+dry_run=false
+path=""
+
+for arg in "$@"; do
+    case $arg in
+        --dry-run)
+            dry_run=true
+            ;;
+        *)
+            path="$arg"
+            ;;
+    esac
+done
+
+# Vérifier qu'un chemin ou un pattern a été fourni
+if [ -z "$path" ]; then
+    echo "Erreur : aucun chemin ou pattern spécifié."
+    display_help
+    exit 1
+fi
+
+# Trouver tous les fichiers correspondant au pattern
+files=$(find $path -type f \( -iname "*.jpg" -o -iname "*.jpeg" \) 2>/dev/null)
+
+# Vérifier si des fichiers ont été trouvés
+if [ -z "$files" ]; then
+    echo "Aucun fichier trouvé pour le pattern spécifié : $path"
+    exit 0
+fi
+
+# Parcourir tous les fichiers trouvés
+echo "Traitement des fichiers trouvés dans : $path"
+while IFS= read -r file; do
+  echo -e "\e[34mTraitement de $(basename "$file")\e[0m"
+    FILE_SIZE_MB=$(du -m "$file" | cut -f1)  # Taille du fichier en Mo
+
+    if [ "$FILE_SIZE_MB" -le "$MAX_SIZE_MB" ]; then
+      echo -e "\e[32mIgnoré\e[0m : $(basename "$file") (taille actuelle : ${FILE_SIZE_MB} Mo)"
+        continue
+    fi
+
+    QUALITY=$INITIAL_QUALITY
+    TEMP_FILE="${file}.temp"
+
+    # Réduire la qualité jusqu'à ce que la taille soit acceptable
+    while [ "$FILE_SIZE_MB" -gt "$MAX_SIZE_MB" ]; do
+        if [ "$QUALITY" -lt $MINIMUM_QUALITY ]; then
+          echo "Impossible d'atteindre la taille cible pour $(basename "$file") (Qualité minimale atteinte)."
+            break
+        fi
+
+        # Compresser l'image temporairement avec imagemagick
+        convert "$file" -quality "$QUALITY" "$TEMP_FILE"
+        FILE_SIZE_MB=$(du -m "$TEMP_FILE" | cut -f1)  # Taille après compression
+
+        echo -e "Compression : \e[32m$(basename "$file")\e[0m (Qualité $QUALITY%, taille après compression : ${FILE_SIZE_MB} Mo)"
+        QUALITY=$((QUALITY - STEP_QUALITY))
+    done
+
+    # Remplacer l'image d'origine si le fichier temporaire est plus petit
+    if [ -f "$TEMP_FILE" ] && [ "$dry_run" != true ]; then
+        mv "$TEMP_FILE" "$file"
+    else
+        rm -f "$TEMP_FILE"
+    fi
+done <<< "$files"
+
+echo "Optimisation terminée."

@@ -179,15 +179,17 @@ find "$SOURCE_DIR" -type f | while read -r FILE; do
   SUBFOLDER="$LOCATION"
   DEST_DIR="$TARGET_BASE_DIR/$DATE/$SUBFOLDER"
   FINAL_DEST="$DEST_DIR/$(basename "$FILE")"
+  FINAL_DEST_SHORT="$DATE/$SUBFOLDER/$(basename "$FILE")"
 
   if [ "$DRY_RUN" = true ]; then
-    FINAL_DEST_SHORT="$DATE/$SUBFOLDER/$(basename "$FILE")"
     echo -e "\e[34mDry run\e[0m: $(basename "$FILE") serait copié vers \e[32m$FINAL_DEST_SHORT\e[0m"
   else
     mkdir -p "$DEST_DIR"
-    echo "Copie de $FILE vers $FINAL_DEST"
+    echo -e "Copie de $(basename "$FILE") vers \e[32m$FINAL_DEST_SHORT\e[0m"
     cp "$FILE" "$FINAL_DEST"
   fi
 done
 
-echo "Réorganisation terminée."
+file_count_source=$(find "$SOURCE_DIR" -type f | wc -l)
+file_count_target=$(find "$TARGET_BASE_DIR" -type f | wc -l)
+echo "Réorganisation terminée ($file_count_source->$file_count_target fichiers)."

@@ -1,0 +1,114 @@
+#!/bin/bash
+
+# Fonction pour afficher l'aide
+display_help() {
+    echo "Usage: $0 <path_or_pattern> [--dry-run] [--help]"
+    echo
+    echo "Options:"
+    echo "  <path_or_pattern>    Chemin vers les fichiers à traiter, peut inclure des wildcards (e.g., './path/to/files/*' ou './path/to/**')."
+    echo "  --dry-run            Affiche les nouveaux noms sans renommer réellement les fichiers."
+    echo "  --help               Affiche cette aide."
+    exit 0
+}
+
+# Liste des regex à appliquer pour nettoyer les noms de fichiers
+CLEANUP_REGEX=(
+    '[0-9]{4}-[0-9]{2}-[0-9]{2}_' # date
+    'DC-GX9_'  # Exemple : DC-GX9
+    'Aquaris X Pro-'  # Exemple : DC-GX9
+    'Aquaris X Pro_'  # Exemple : DC-GX9
+)
+
+# Vérification des options
+if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+    display_help
+    exit 0
+fi
+
+# Lire les options et les arguments
+dry_run=false
+path=""
+
+for arg in "$@"; do
+    case $arg in
+        --dry-run)
+            dry_run=true
+            ;;
+        *)
+            path="$arg"
+            ;;
+    esac
+done
+
+# Vérifier qu'un chemin ou un pattern a été fourni
+if [ -z "$path" ]; then
+    echo "Erreur : aucun chemin ou pattern spécifié."
+    display_help
+    exit 1
+fi
+
+# Trouver tous les fichiers correspondant au pattern
+files=$(find $path -type f 2>/dev/null)
+
+# Vérifier si des fichiers ont été trouvés
+if [ -z "$files" ]; then
+    echo "Aucun fichier trouvé pour le pattern spécifié : $path"
+    exit 0
+fi
+
+# Fonction pour nettoyer le nom original selon des regex
+clean_filename() {
+    local filename="$1"
+    local cleaned_filename="$filename"
+
+    for regex in "${CLEANUP_REGEX[@]}"; do
+        cleaned_filename=$(echo "$cleaned_filename" | sed -E "s/$regex//g")
+    done
+
+    # Supprimer les répétitions inutiles de caractères comme "__" résultant du nettoyage
+    cleaned_filename=$(echo "$cleaned_filename" | sed 's/__/_/g' | sed 's/^_//;s/_$//')
+    echo "$cleaned_filename"
+}
+
+# Parcourir les fichiers trouvés
+echo "Traitement des fichiers trouvés dans : $path"
+while IFS= read -r FILE; do
+    # Extraire les données EXIF
+    DATE=$(exiftool -d "%Y-%m-%d" -DateTimeOriginal -s3 "$FILE")
+    MAKE=$(exiftool -Make -s3 "$FILE")
+    MODEL=$(exiftool -Model -s3 "$FILE")
+
+    # Récupérer le nom original à partir des EXIF (ordre de priorité)
+    ORIGINAL_NAME=$(exiftool -OriginalFileName -s3 "$FILE")
+    if [ -z "$ORIGINAL_NAME" ]; then
+        ORIGINAL_NAME=$(exiftool -DerivedFrom -s3 "$FILE")
+    fi
+    if [ -z "$ORIGINAL_NAME" ]; then
+        ORIGINAL_NAME=$(exiftool -PreservedFileName -s3 "$FILE")
+    fi
+    if [ -z "$ORIGINAL_NAME" ]; then
+        ORIGINAL_NAME=$(basename "$FILE")
+    fi
+
+    # Nettoyer le nom d'origine si on s'est rabattu sur lui
+    ORIGINAL_NAME=$(clean_filename "$ORIGINAL_NAME")
+
+    # Gérer les valeurs manquantes
+    DATE="${DATE:-UNKNOWN-DATE}"
+    MAKE="${MAKE:-UNKNOWN-MAKE}"
+    MODEL="${MODEL:-UNKNOWN-MODEL}"
+
+    # Créer le nouveau nom du fichier
+    NEW_NAME="${DATE}_${MAKE}-${MODEL}_${ORIGINAL_NAME}"
+    NEW_PATH="$(dirname "$FILE")/$NEW_NAME"
+
+    # Mode dry-run ou renommage réel
+    if [ "$dry_run" = true ]; then
+        echo -e "\e[34mDry run\e[0m: "$FILE" serait renommé en \e[32m$NEW_NAME\e[0m"
+    else
+        echo -e "Renommage: "$FILE" -> \e[32m$NEW_NAME\e[0m"
+        mv "$FILE" "$NEW_PATH"
+    fi
+done <<< "$files"
+
+echo "Traitement terminé."
