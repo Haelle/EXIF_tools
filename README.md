@@ -1,11 +1,11 @@
 # EXIF Tools
 
 Workflow:
+- run duplicate detection with DupeGuru
 - import in Darktable
 - reject photos
 - add geotag
 - export from Darktable
-- run duplicate detection with DupeGuru
 - run renamings (rename_by_exif)
 - create album(s) if needed in EXIF (batch_edit_exif)
 - run reorganize (organize_by_exif)
