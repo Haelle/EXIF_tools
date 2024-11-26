@@ -1,0 +1,96 @@
+#!/bin/bash
+
+# Fonction pour afficher l'aide
+display_help() {
+    echo "Usage: $0 <source_path> <destination_path> [--dry-run] [--help]"
+    echo
+    echo "Options:"
+    echo "  <source_path>       Chemin du dossier source contenant les fichiers."
+    echo "  <destination_path>  Chemin du dossier où déplacer les vidéos."
+    echo "  --dry-run           Affiche les actions qui seraient réalisées sans déplacer les fichiers."
+    echo "  --help              Affiche cette aide."
+    echo
+    echo "Description:"
+    echo "  Ce script déplace toutes les vidéos d'un dossier source (récursivement) vers un dossier de destination"
+    echo "  tout en conservant la structure initiale des sous-dossiers."
+    exit 0
+}
+
+# Vérification des arguments
+dry_run=false
+
+if [[ "$#" -lt 2 || "$1" == "--help" ]]; then
+    display_help
+fi
+
+# Lecture des options
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --dry-run)
+            dry_run=true
+            shift
+            ;;
+        *)
+            if [ -z "$SOURCE" ]; then
+                SOURCE="$1"
+            elif [ -z "$DESTINATION" ]; then
+                DESTINATION="$1"
+            else
+                echo "Erreur : Trop d'arguments fournis."
+                display_help
+            fi
+            shift
+            ;;
+    esac
+done
+
+# Vérifier que le dossier source existe
+if [ ! -d "$SOURCE" ]; then
+    echo "Erreur : le dossier source spécifié n'existe pas."
+    exit 1
+fi
+
+# Vérifier que le dossier de destination existe ou le créer
+if [ ! -d "$DESTINATION" ]; then
+    echo "Le dossier de destination n'existe pas, création de $DESTINATION..."
+    mkdir -p "$DESTINATION"
+fi
+
+# Extensions de fichiers vidéo courantes
+VIDEO_EXTENSIONS=("*.mp4" "*.avi" "*.mov" "*.mkv" "*.wmv" "*.flv" "*.webm" "*.m4v")
+
+# Construire la chaîne des options -iname pour find
+find_inames=""
+for ext in "${VIDEO_EXTENSIONS[@]}"; do
+    find_inames+=" -iname \"$ext\" -o"
+done
+find_inames=${find_inames% -o} # Supprimer le dernier -o
+
+echo "SOURCE: $SOURCE"
+echo "DESTINATION: $DESTINATION"
+
+# Exécuter find pour trouver les vidéos et les déplacer
+eval find \"$SOURCE\" -type f $find_inames | while read -r FILE; do
+    # Construire le chemin relatif
+    RELATIVE_PATH=$(realpath --relative-to="$SOURCE" "$FILE")
+
+    # Construire le chemin final dans le dossier de destination
+    RELATIVE_DIR=$(dirname "$RELATIVE_PATH")
+    if [ "$RELATIVE_DIR" = "." ]; then
+        DEST_PATH="$DESTINATION"
+    else
+        DEST_PATH="$DESTINATION/$RELATIVE_DIR"
+    fi
+
+    if [ "$dry_run" = true ]; then
+        echo "[Dry run] Déplacement : $FILE -> $DEST_PATH/"
+    else
+        # Créer les sous-dossiers si nécessaire
+        mkdir -p "$DEST_PATH"
+        # Déplacer le fichier
+        echo "Déplacement : $FILE -> $DEST_PATH/"
+        mv "$FILE" "$DEST_PATH/"
+    fi
+done
+
+echo "Traitement terminé."
