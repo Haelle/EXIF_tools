@@ -75,6 +75,10 @@ echo "Traitement des fichiers trouvés dans : $path"
 while IFS= read -r FILE; do
     # Extraire les données EXIF
     DATE=$(exiftool -d "%Y-%m-%d" -DateTimeOriginal -s3 "$FILE")
+    if [ -z "$DATE" ]; then
+      DATE=$(exiftool -d "%Y-%m-%d" -CreateDate -s3 "$FILE")
+    fi
+
     MAKE=$(exiftool -Make -s3 "$FILE")
     MODEL=$(exiftool -Model -s3 "$FILE")
 

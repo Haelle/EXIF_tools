@@ -156,6 +156,10 @@ get_location_from_mapquest() {
 find "$SOURCE_DIR" -type f | while read -r FILE; do
   # Extraire les données EXIF (date et album ou localisation) en utilisant -s3
   DATE=$(exiftool -d "%Y-%m-%d" -DateTimeOriginal -s3 "$FILE")
+  if [ -z "$DATE" ]; then
+    DATE=$(exiftool -d "%Y-%m-%d" -CreateDate -s3 "$FILE")
+  fi
+
   DATE="${DATE:-UNKNOWN-DATE}"
 
   # Transformer les noms de mois en anglais avec une majuscule
