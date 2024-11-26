@@ -2,11 +2,11 @@
 
 # Fonction pour afficher l'aide
 display_help() {
-  echo "Usage: $0 source=<source_path> destination=<destination_path> [--dry-run] [--clear-cache]"
+  echo "Usage: $0 --source <source_path> --destination <destination_path> [--dry-run] [--clear-cache] [--help]"
   echo
   echo "Options:"
-  echo "  source=<source_path>        Spécifie le chemin du dossier source contenant les fichiers."
-  echo "  destination=<destination_path>   Spécifie le chemin du dossier de destination pour organiser les fichiers."
+  echo "  --source <source_path>      Spécifie le chemin du dossier source contenant les fichiers."
+  echo "  --destination <destination_path>   Spécifie le chemin du dossier de destination pour organiser les fichiers."
   echo "  --dry-run                   Affiche les chemins cibles sans copier les fichiers."
   echo "  --clear-cache               Vide le cache de MapQuest en supprimant ~/.config/EXIF_tools/map_quest_cache.json."
   echo "  --help                      Affiche cette aide."
@@ -17,18 +17,23 @@ display_help() {
 CONFIG_FILE="$HOME/.config/EXIF_tools/config.ini"
 CACHE_FILE="$HOME/.config/EXIF_tools/map_quest_cache.json"
 
+# Initialisation des variables
+SOURCE_DIR=""
+TARGET_BASE_DIR=""
+DRY_RUN=false
+
 # Lire les options de la ligne de commande
-for arg in "$@"; do
-  case $arg in
-    source=*)
-      SOURCE_DIR="${arg#*=}"
+while [[ "$#" -gt 0 ]]; do
+  case $1 in
+    --source)
+      SOURCE_DIR="$2"
       SOURCE_DIR="${SOURCE_DIR/#\~/$HOME}"  # Expansion de ~ vers le répertoire HOME
-      shift
+      shift 2
       ;;
-    destination=*)
-      TARGET_BASE_DIR="${arg#*=}"
+    --destination)
+      TARGET_BASE_DIR="$2"
       TARGET_BASE_DIR="${TARGET_BASE_DIR/#\~/$HOME}"  # Expansion de ~ vers le répertoire HOME
-      shift
+      shift 2
       ;;
     --dry-run)
       DRY_RUN=true
@@ -43,15 +48,15 @@ for arg in "$@"; do
       display_help
       ;;
     *)
-      echo "Option inconnue : $arg"
-      exit 1
+      echo "Option inconnue : $1"
+      display_help
       ;;
   esac
 done
 
 # Vérifier que les dossiers source et destination sont définis
 if [ -z "$SOURCE_DIR" ] || [ -z "$TARGET_BASE_DIR" ]; then
-  echo "Erreur : vous devez spécifier les dossiers source et destination."
+  echo "Erreur : vous devez spécifier les options --source et --destination."
   display_help
 fi
 
@@ -76,8 +81,8 @@ fi
 # Créer le dossier cible si nécessaire
 mkdir -p "$TARGET_BASE_DIR"
 
+# Charger le cache, ou initialiser s'il n'existe pas
 load_cache() {
-  # Charger le cache, ou initialiser s'il n'existe pas
   mkdir -p "$(dirname "$CACHE_FILE")"
   if [ -f "$CACHE_FILE" ]; then
     CACHE=$(<"$CACHE_FILE")
@@ -101,14 +106,10 @@ convert_to_decimal() {
   seconds=$(echo "$dms" | sed 's/.*'\'' \(.*\)".*/\1/')
   direction=$(echo "$dms" | sed 's/.*" \(.*\)/\1/')
 
-  # Convertir en format décimal avec 3 chiffres après la virugle (pour réduire l'efficacité du cache ~1km)
   decimal=$(echo "scale=3; $degrees + ($minutes / 60) + ($seconds / 3600)" | bc -l)
-
-  # Si la direction est Sud ou Ouest, rendre la valeur négative
   if [[ "$direction" == "S" || "$direction" == "W" ]]; then
     decimal=$(echo "-$decimal" | bc -l)
   fi
-
   echo "$decimal"
 }
 
@@ -118,7 +119,6 @@ get_location_from_mapquest() {
   LON=$2
   load_cache
 
-  # Vérifier si les coordonnées existent dans le cache
   COORD_KEY="${LAT},${LON}"
   LOCATION=$(echo "$CACHE" | jq -r --arg key "$COORD_KEY" '.[$key]')
 
@@ -127,14 +127,13 @@ get_location_from_mapquest() {
     return
   fi
 
-  # Appeler l'API de MapQuest si le résultat n'est pas en cache
   LANGUAGE="fr"
   if [ "$PREFER_ENGLISH_NAMES" = "True" ]; then
     LANGUAGE="en"
   fi
 
   COMMAND="https://www.mapquestapi.com/geocoding/v1/reverse?key=$MAPQUEST_API_KEY&location=$LAT,$LON&outFormat=json&locale=$LANGUAGE"
-  LOCATION=$(curl -s $COMMAND | jq -r '.results[0].locations[0]')
+  LOCATION=$(curl -s "$COMMAND" | jq -r '.results[0].locations[0]')
 
   TOWN=$(echo "$LOCATION" | jq -r '.adminArea5 // ""')
   CITY=$(echo "$LOCATION" | jq -r '.adminArea4 // ""')
@@ -146,7 +145,6 @@ get_location_from_mapquest() {
   FORMATTED_LOCATION="${FORMATTED_LOCATION//%state/$STATE}"
   FORMATTED_LOCATION="${FORMATTED_LOCATION:-UNKNOWN-LOCATION}"
 
-  # Ajouter au cache
   update_cache "$COORD_KEY" "$FORMATTED_LOCATION"
 
   echo "$FORMATTED_LOCATION"
@@ -154,15 +152,11 @@ get_location_from_mapquest() {
 
 # Parcourir tous les fichiers du dossier source
 find "$SOURCE_DIR" -type f | while read -r FILE; do
-  # Extraire les données EXIF (date et album ou localisation) en utilisant -s3
   DATE=$(exiftool -d "%Y-%m-%d" -DateTimeOriginal -s3 "$FILE")
   if [ -z "$DATE" ]; then
     DATE=$(exiftool -d "%Y-%m-%d" -CreateDate -s3 "$FILE")
   fi
-
   DATE="${DATE:-UNKNOWN-DATE}"
-
-  # Transformer les noms de mois en anglais avec une majuscule
   DATE=$(LC_ALL=en_EN date -d "$DATE" +"%Y-%m-%B" 2>/dev/null || echo "UNKNOWN-DATE")
 
   ALBUM=$(exiftool -Album -s3 "$FILE")

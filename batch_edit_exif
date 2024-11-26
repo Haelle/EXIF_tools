@@ -2,24 +2,24 @@
 
 # Fonction pour afficher l'aide
 show_help() {
-    echo "Usage: $0 <fichiers> EXIF_NAME=nouvelle_valeur [--dry-run]"
+    echo "Usage: $0 <fichiers> [--OptionEXIF \"Valeur\"] [--dry-run] [--help]"
     echo ""
-    echo "Script pour modifier une métadonnée EXIF spécifique pour une liste de fichiers."
+    echo "Script pour modifier une ou plusieurs métadonnées EXIF spécifiques pour une liste de fichiers."
     echo ""
     echo "Arguments :"
     echo "  <fichiers>              Liste des fichiers ou chemin vers des fichiers (wildcards autorisés)."
-    echo "  EXIF_NAME=valeur        Nom de la variable EXIF à modifier et la nouvelle valeur à définir."
+    echo "  --Option \"Valeur\"       Nom de la variable EXIF à modifier et la nouvelle valeur à définir."
     echo ""
     echo "Options :"
     echo "  --dry-run               Afficher les modifications qui seraient effectuées sans modifier les fichiers."
     echo "  -h, --help              Afficher cette aide et quitter."
     echo ""
     echo "Exemple :"
-    echo "  $0 ./path/to/files/* Album=\"Mes Vacances\" --dry-run"
-    echo "  $0 ./path/to/files/* Camera=\"Robot Royal 36\""
-    echo "  $0 ./path/to/files/* CreateDate=\"2024-11-26 00:00:00\""
-    echo "  $0 ./path/to/files/* Subject=\"My Album\""
-    echo "  $0 ./path/to/files/* Author=\"John Doe\""
+    echo "  $0 ./path/to/files/* --Album \"Mes Vacances\" --dry-run"
+    echo "  $0 ./path/to/files/* --Camera \"Robot Royal 36\""
+    echo "  $0 ./path/to/files/* --CreateDate \"2024-11-26 00:00:00\""
+    echo "  $0 ./path/to/files/* --Subject \"My Album\""
+    echo "  $0 ./path/to/files/* --Author \"John Doe\""
     echo ""
     echo "Ce script nécessite 'exiftool' pour fonctionner."
 }
@@ -30,27 +30,41 @@ if [[ "$1" == "-h" || "$1" == "--help" ]]; then
     exit 0
 fi
 
-# Vérification de la présence d'au moins deux arguments
+# Vérification de la présence d'au moins un fichier et une option
 if [ "$#" -lt 2 ]; then
     echo "Erreur : nombre d'arguments incorrect."
     show_help
     exit 1
 fi
 
-# Extraire les arguments
+# Initialisation des variables
 dry_run=false
 files=()
-exif_data=""
+declare -A exif_data
 
-# Parcourir les arguments pour séparer fichiers, EXIF_NAME=valeur, et --dry-run
-for arg in "$@"; do
-    if [[ "$arg" == "--dry-run" ]]; then
-        dry_run=true
-    elif [[ "$arg" == *"="* ]]; then
-        exif_data="$arg"
-    else
-        files+=("$arg")
-    fi
+# Parcourir les arguments pour séparer fichiers, options EXIF, et --dry-run
+while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+        --dry-run)
+            dry_run=true
+            shift
+            ;;
+        --*)
+            option="${1#--}"  # Supprime les deux tirets
+            value="$2"
+            if [[ -z "$value" || "$value" == --* ]]; then
+                echo "Erreur : L'option $1 nécessite une valeur."
+                show_help
+                exit 1
+            fi
+            exif_data["$option"]="$value"
+            shift 2
+            ;;
+        *)
+            files+=("$1")
+            shift
+            ;;
+    esac
 done
 
 # Vérifier que des fichiers ont été fournis
@@ -60,16 +74,12 @@ if [ "${#files[@]}" -eq 0 ]; then
     exit 1
 fi
 
-# Vérifier que la paire EXIF_NAME=valeur est valide
-if [ -z "$exif_data" ]; then
+# Vérifier que des métadonnées EXIF ont été fournies
+if [ "${#exif_data[@]}" -eq 0 ]; then
     echo "Erreur : aucune métadonnée EXIF à modifier spécifiée."
     show_help
     exit 1
 fi
-
-# Séparer le nom EXIF et la valeur
-exif_name=$(echo "$exif_data" | cut -d'=' -f1)
-new_value=$(echo "$exif_data" | cut -d'=' -f2)
 
 # Vérifier que exiftool est installé
 if ! command -v exiftool &> /dev/null; then
@@ -77,7 +87,10 @@ if ! command -v exiftool &> /dev/null; then
     exit 1
 fi
 
-echo -e "Mise à jour du tag EXIF: \e[34m$exif_name\e[0m"
+echo "Mise à jour des tags EXIF :"
+for key in "${!exif_data[@]}"; do
+    echo "  $key -> ${exif_data[$key]}"
+done
 
 # Parcourir les fichiers spécifiés
 for file in "${files[@]}"; do
@@ -86,15 +99,19 @@ for file in "${files[@]}"; do
         continue
     fi
 
-    # Récupérer la valeur actuelle du tag
-    current_value=$(exiftool -s3 -"$exif_name" "$file")
+    echo "Traitement du fichier : $file"
 
-    if [ "$dry_run" = true ]; then
-        echo -e "\e[34mDry run\e[0m: $file : '\e[31m$current_value\e[0m' -> '\e[32m$new_value\e[0m'"
-    else
-        echo -e "$file : '\e[31m$current_value\e[0m' -> '\e[32m$new_value\e[0m'"
-        exiftool -overwrite_original -"$exif_name"="$new_value" "$file"
-    fi
+    for key in "${!exif_data[@]}"; do
+        value="${exif_data[$key]}"
+        current_value=$(exiftool -s3 -"$key" "$file")
+
+        if [ "$dry_run" = true ]; then
+            echo -e "-> \e[34m[Dry run]\e[0m $key : '\e[31m$current_value\e[0m' -> '\e[32m$value\e[0m'"
+        else
+            echo -e "  $key : '\e[31m$current_value\e[0m' -> '\e[32m$value\e[0m'"
+            exiftool -overwrite_original -"$key"="$value" "$file"
+        fi
+    done
 done
 
 echo -e '\e[32mOpération terminée.\e[0m'
