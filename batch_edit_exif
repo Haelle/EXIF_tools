@@ -17,7 +17,7 @@ show_help() {
     echo "Exemple :"
     echo "  $0 ./path/to/files/* --Album \"Mes Vacances\" --dry-run"
     echo "  $0 ./path/to/files/* --Camera \"Robot Royal 36\""
-    echo "  $0 ./path/to/files/* --CreateDate \"2024-11-26 00:00:00\""
+    echo "  $0 ./path/to/files/* --DateTimeOriginal \"2024-11-26 00:00:00\""
     echo "  $0 ./path/to/files/* --Subject \"My Album\""
     echo "  $0 ./path/to/files/* --Author \"John Doe\""
     echo ""
@@ -114,4 +114,4 @@ for file in "${files[@]}"; do
     done
 done
 
-echo -e '\e[32mOpération terminée.\e[0m'
+echo -e '\e[32mEXIF mis à jour.\e[0m'

@@ -2,12 +2,13 @@
 
 # Fonction pour afficher l'aide
 display_help() {
-  echo "Usage: $0 --source <source_path> --destination <destination_path> [--dry-run] [--clear-cache] [--help]"
+  echo "Usage: $0 --source <source_path> --destination <destination_path> [--dry-run] [--move] [--clear-cache] [--help]"
   echo
   echo "Options:"
   echo "  --source <source_path>      Spécifie le chemin du dossier source contenant les fichiers."
   echo "  --destination <destination_path>   Spécifie le chemin du dossier de destination pour organiser les fichiers."
-  echo "  --dry-run                   Affiche les chemins cibles sans copier les fichiers."
+  echo "  --dry-run                   Affiche les chemins cibles sans copier ou déplacer les fichiers."
+  echo "  --move                      Déplace les fichiers au lieu de les copier."
   echo "  --clear-cache               Vide le cache de MapQuest en supprimant ~/.config/EXIF_tools/map_quest_cache.json."
   echo "  --help                      Affiche cette aide."
   exit 0
@@ -21,6 +22,7 @@ CACHE_FILE="$HOME/.config/EXIF_tools/map_quest_cache.json"
 SOURCE_DIR=""
 TARGET_BASE_DIR=""
 DRY_RUN=false
+MOVE_FILES=false
 
 # Lire les options de la ligne de commande
 while [[ "$#" -gt 0 ]]; do
@@ -37,6 +39,10 @@ while [[ "$#" -gt 0 ]]; do
       ;;
     --dry-run)
       DRY_RUN=true
+      shift
+      ;;
+    --move)
+      MOVE_FILES=true
       shift
       ;;
     --clear-cache)
@@ -180,11 +186,16 @@ find "$SOURCE_DIR" -type f | while read -r FILE; do
   FINAL_DEST_SHORT="$DATE/$SUBFOLDER/$(basename "$FILE")"
 
   if [ "$DRY_RUN" = true ]; then
-    echo -e "\e[34mDry run\e[0m: $(basename "$FILE") serait copié vers \e[32m$FINAL_DEST_SHORT\e[0m"
+    echo -e "\e[34mDry run\e[0m: $(basename "$FILE") serait déplacé/copié vers \e[32m$FINAL_DEST_SHORT\e[0m"
   else
     mkdir -p "$DEST_DIR"
-    echo -e "Copie de $(basename "$FILE") vers \e[32m$FINAL_DEST_SHORT\e[0m"
-    cp "$FILE" "$FINAL_DEST"
+    if [ "$MOVE_FILES" = true ]; then
+      echo -e "Déplacement de $(basename "$FILE") vers \e[32m$FINAL_DEST_SHORT\e[0m"
+      mv "$FILE" "$FINAL_DEST"
+    else
+      echo -e "Copie de $(basename "$FILE") vers \e[32m$FINAL_DEST_SHORT\e[0m"
+      cp "$FILE" "$FINAL_DEST"
+    fi
   fi
 done
 

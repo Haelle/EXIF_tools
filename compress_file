@@ -1,6 +1,6 @@
 #!/bin/bash
 
-MAX_SIZE_MB=2  # Taille maximale souhaitée en Mo
+MAX_SIZE_MB=3  # Taille maximale souhaitée en Mo
 INITIAL_QUALITY=90  # Qualité initiale pour les fichiers trop volumineux
 STEP_QUALITY=5  # Réduction de qualité par étape
 MINIMUM_QUALITY=75  # Qualité minimale pour éviter une trop grande perte de qualité

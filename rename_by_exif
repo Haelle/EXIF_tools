@@ -98,12 +98,18 @@ while IFS= read -r FILE; do
     ORIGINAL_NAME=$(clean_filename "$ORIGINAL_NAME")
 
     # Gérer les valeurs manquantes
-    DATE="${DATE:-UNKNOWN-DATE}"
-    MAKE="${MAKE:-UNKNOWN-MAKE}"
-    MODEL="${MODEL:-UNKNOWN-MODEL}"
+    DATE="${DATE:-}"
+    MAKE="${MAKE:-}"
+    MODEL="${MODEL:-}"
 
-    # Créer le nouveau nom du fichier
-    NEW_NAME="${DATE}_${MAKE}-${MODEL}_${ORIGINAL_NAME}"
+    # Construire le nouveau nom de fichier conditionnellement
+    NEW_NAME=""
+    [ -n "$DATE" ] && NEW_NAME+="${DATE}_"
+    [ -n "$MAKE" ] && NEW_NAME+="${MAKE}-"
+    [ -n "$MODEL" ] && NEW_NAME+="${MODEL}_"
+
+    # Ajouter le nom original (toujours présent)
+    NEW_NAME+="$ORIGINAL_NAME"
     NEW_PATH="$(dirname "$FILE")/$NEW_NAME"
 
     # Mode dry-run ou renommage réel
@@ -115,4 +121,4 @@ while IFS= read -r FILE; do
     fi
 done <<< "$files"
 
-echo "Traitement terminé."
+echo "Renommage terminé."
