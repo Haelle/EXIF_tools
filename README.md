@@ -29,3 +29,11 @@ Run `./batch_edit_exif --help`
 A script to sort file by EXIF, inspired by [elodie](https://github.com/jmathai/elodie).
 
 Run `./organize_by_exif --help`
+
+# Change DateTimeOriginal based on filename
+
+This command change the datetime of all file in the directory based on the filename (YYYYMMDD_HHMMSS* -> YYYYMMDD HH:MM:SS)
+
+```
+exiftool -overwrite_original '-DateTimeOriginal<${Filename;m/^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/$1:$2:$3 $4:$5:$6/}' .
+```

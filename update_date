@@ -1,0 +1,35 @@
+#!/bin/bash
+
+# Vérifie que exiftool est installé
+if ! command -v exiftool &> /dev/null; then
+    echo "Erreur : exiftool n'est pas installé." >&2
+    exit 1
+fi
+
+# Parcours tous les fichiers correspondant au format WhatsApp
+for f in VID-????????-WA????.mp4; do
+    [ -e "$f" ] || continue  # ignore si aucun fichier ne correspond
+
+    echo "Traitement : $f"
+
+    # Extraire la date depuis le nom du fichier (ex : VID-20241027-WA0002.mp4)
+    if [[ "$f" =~ VID-([0-9]{4})([0-9]{2})([0-9]{2})-WA[0-9]+\.mp4 ]]; then
+        year="${BASH_REMATCH[1]}"
+        month="${BASH_REMATCH[2]}"
+        day="${BASH_REMATCH[3]}"
+        date_str="${year}:${month}:${day} 12:00:00"
+
+        echo " → Définition de la date de $f à $date_str"
+
+        # Appliquer la date à divers tags de création
+        exiftool -overwrite_original \
+            "-CreateDate=$date_str" \
+            "-ModifyDate=$date_str" \
+            "-MediaCreateDate=$date_str" \
+            "-TrackCreateDate=$date_str" \
+            "-TrackModifyDate=$date_str" \
+            "$f"
+    else
+        echo " ⚠️  Format de nom de fichier non reconnu : $f"
+    fi
+done
