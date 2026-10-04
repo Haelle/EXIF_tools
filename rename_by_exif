@@ -27,7 +27,7 @@ fi
 
 # Lire les options et les arguments
 dry_run=false
-path=""
+paths=()
 
 for arg in "$@"; do
     case $arg in
@@ -35,24 +35,24 @@ for arg in "$@"; do
             dry_run=true
             ;;
         *)
-            path="$arg"
+            paths+=("$arg")
             ;;
     esac
 done
 
 # Vérifier qu'un chemin ou un pattern a été fourni
-if [ -z "$path" ]; then
+if [ ${#paths[@]} -eq 0 ]; then
     echo "Erreur : aucun chemin ou pattern spécifié."
     display_help
     exit 1
 fi
 
 # Trouver tous les fichiers correspondant au pattern
-files=$(find $path -type f 2>/dev/null)
+files=$(find "${paths[@]}" -type f 2>/dev/null)
 
 # Vérifier si des fichiers ont été trouvés
 if [ -z "$files" ]; then
-    echo "Aucun fichier trouvé pour le pattern spécifié : $path"
+    echo "Aucun fichier trouvé pour le pattern spécifié : ${paths[*]}"
     exit 0
 fi
 
@@ -71,7 +71,7 @@ clean_filename() {
 }
 
 # Parcourir les fichiers trouvés
-echo "Traitement des fichiers trouvés dans : $path"
+echo "Traitement des fichiers trouvés dans : ${paths[*]}"
 while IFS= read -r FILE; do
     # Extraire les données EXIF
     DATE=$(exiftool -d "%Y-%m-%d" -DateTimeOriginal -s3 "$FILE")

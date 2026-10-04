@@ -18,7 +18,7 @@ display_help() {
 
 # Lire les options de la ligne de commande
 dry_run=false
-path=""
+paths=()
 
 for arg in "$@"; do
     case $arg in
@@ -26,29 +26,35 @@ for arg in "$@"; do
             dry_run=true
             ;;
         *)
-            path="$arg"
+            paths+=("${arg/#\~/$HOME}")
             ;;
     esac
 done
 
 # Vérifier qu'un chemin ou un pattern a été fourni
-if [ -z "$path" ]; then
+if [ ${#paths[@]} -eq 0 ]; then
     echo "Erreur : aucun chemin ou pattern spécifié."
     display_help
     exit 1
 fi
 
 # Trouver tous les fichiers correspondant au pattern
-files=$(find $path -type f \( -iname "*.jpg" -o -iname "*.jpeg" \) 2>/dev/null)
+expanded_paths=()
+IFS=
+for pattern in "${paths[@]}"; do
+    expanded_paths+=($pattern)
+done
+unset IFS
+files=$(find "${expanded_paths[@]}" -type f \( -iname "*.jpg" -o -iname "*.jpeg" \) 2>/dev/null)
 
 # Vérifier si des fichiers ont été trouvés
 if [ -z "$files" ]; then
-    echo "Aucun fichier trouvé pour le pattern spécifié : $path"
+    echo "Aucun fichier trouvé pour le pattern spécifié : ${paths[*]}"
     exit 0
 fi
 
 # Parcourir tous les fichiers trouvés
-echo "Traitement des fichiers trouvés dans : $path"
+echo "Traitement des fichiers trouvés dans : ${paths[*]}"
 while IFS= read -r file; do
   echo -e "\e[34mTraitement de $(basename "$file")\e[0m"
     FILE_SIZE_MB=$(du -m "$file" | cut -f1)  # Taille du fichier en Mo
@@ -58,6 +64,7 @@ while IFS= read -r file; do
         continue
     fi
 
+    ORIGINAL_SIZE_MB=$FILE_SIZE_MB
     QUALITY=$INITIAL_QUALITY
     TEMP_FILE="${file}.temp"
 
@@ -72,7 +79,7 @@ while IFS= read -r file; do
         convert "$file" -quality "$QUALITY" "$TEMP_FILE"
         FILE_SIZE_MB=$(du -m "$TEMP_FILE" | cut -f1)  # Taille après compression
 
-        echo -e "Compression : \e[32m$(basename "$file")\e[0m (Qualité $QUALITY%, taille après compression : ${FILE_SIZE_MB} Mo)"
+        echo -e "Compression : \e[32m$(basename "$file")\e[0m (Qualité $QUALITY%, taille : ${ORIGINAL_SIZE_MB} Mo → ${FILE_SIZE_MB} Mo)"
         QUALITY=$((QUALITY - STEP_QUALITY))
     done
 

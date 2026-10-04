@@ -1,0 +1,157 @@
+#!/bin/bash
+
+display_help() {
+    echo "Usage: $0 --source <fichiers/dossiers> --reference <fichiers/dossiers> [--max-hour-gap <heures>] [--dry-run] [--help]"
+    echo
+    echo "Pour chaque fichier source (vidéo), trouve la photo de référence la plus proche dans le temps"
+    echo "et lui applique son Album et sa géolocalisation via batch_edit_exif."
+    echo
+    echo "Options:"
+    echo "  --source <paths...>      Fichiers à retagger (wildcards autorisés, e.g. './videos/**')."
+    echo "  --reference <paths...>   Fichiers de référence déjà taggés (e.g. './photos/**')."
+    echo "  --max-hour-gap <heures>  Écart maximum entre la source et la référence (défaut : 6)."
+    echo "  --dry-run                Affiche les correspondances sans modifier les fichiers."
+    echo "  --help                   Affiche cette aide."
+    echo
+    echo "Date d'une source : nom de fichier (YYYYMMDD_HHMMSS), sinon DateTimeOriginal, sinon CreateDate."
+    echo "Date d'une référence : DateTimeOriginal, sinon CreateDate, sinon nom de fichier."
+    exit 0
+}
+
+BATCH_EDIT_EXIF="$(dirname "$0")/batch_edit_exif"
+FILENAME_DATE_REGEX='(?<Y>[0-9]{4})(?<m>[0-9]{2})(?<d>[0-9]{2})_?(?<H>[0-9]{2})(?<M>[0-9]{2})(?<S>[0-9]{2})'
+
+source_paths=()
+reference_paths=()
+max_gap_hours=6
+dry_run=false
+current_list=""
+
+while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+        --source) current_list=source; shift ;;
+        --reference) current_list=reference; shift ;;
+        --max-hour-gap) max_gap_hours="$2"; current_list=""; shift 2 ;;
+        --dry-run) dry_run=true; current_list=""; shift ;;
+        -h|--help) display_help ;;
+        --*) echo "Option inconnue : $1"; display_help ;;
+        *)
+            case "$current_list" in
+                source) source_paths+=("$1") ;;
+                reference) reference_paths+=("$1") ;;
+                *) echo "Argument inattendu : $1"; display_help ;;
+            esac
+            shift
+            ;;
+    esac
+done
+
+if [ ${#source_paths[@]} -eq 0 ] || [ ${#reference_paths[@]} -eq 0 ]; then
+    echo -e "\e[31mErreur : --source et --reference sont obligatoires.\e[0m"
+    display_help
+fi
+
+for tool in exiftool jq; do
+    if ! command -v "$tool" &> /dev/null; then
+        echo -e "\e[31m$tool n'est pas installé.\e[0m"
+        exit 1
+    fi
+done
+
+list_files() {
+    find "$@" -type f 2>/dev/null | sort -u
+}
+
+# Outputs fields separated by \037 (not tab: bash read merges consecutive tabs): epoch, file, album, latitude, longitude
+build_index() {
+    local prefer_filename_date="$1"
+    shift
+    list_files "$@" \
+        | exiftool -@ - -j -q -api QuickTimeUTC -d '%Y %m %d %H %M %S' \
+            -FileName -DateTimeOriginal -CreateDate -Album '-GPSLatitude#' '-GPSLongitude#' \
+        | jq -r --argjson prefer_filename "$prefer_filename_date" --arg regex "$FILENAME_DATE_REGEX" '
+            .[]
+            | ([.FileName | capture($regex) | "\(.Y) \(.m) \(.d) \(.H) \(.M) \(.S)"] | first) as $filename_date
+            | (.DateTimeOriginal // .CreateDate | if type == "string" and test("^[0-9]{4} ") and (startswith("0000") | not) then . else null end) as $exif_date
+            | (if $prefer_filename then ($filename_date // $exif_date) else ($exif_date // $filename_date) end) as $date
+            | select($date)
+            | [$date, .SourceFile, (.Album // ""), (.GPSLatitude // ""), (.GPSLongitude // "")] | @tsv' \
+        | awk -F '\t' -v OFS='\037' '{ $1 = mktime($1); print }'
+}
+
+find_closest_reference() {
+    local epoch="$1"
+    awk -F '\037' -v OFS='\037' -v target="$epoch" -v max_gap=$((max_gap_hours * 3600)) '
+        { gap = $1 - target; if (gap < 0) gap = -gap }
+        gap <= max_gap && (best == "" || gap < best_gap) { best = $0; best_gap = gap }
+        END { if (best != "") print best_gap, best }' "$reference_index"
+}
+
+is_quicktime() {
+    [[ "${1,,}" =~ \.(mp4|mov|m4v|3gp)$ ]]
+}
+
+format_gap() {
+    local seconds="$1"
+    printf '%dh%02dm%02ds' $((seconds / 3600)) $((seconds % 3600 / 60)) $((seconds % 60))
+}
+
+reference_index=$(mktemp)
+source_index=$(mktemp)
+trap 'rm -f "$reference_index" "$source_index"' EXIT
+
+echo -e "\e[34mIndexation des références...\e[0m"
+build_index false "${reference_paths[@]}" | awk -F '\037' '$3 != "" || $4 != ""' > "$reference_index"
+echo "$(wc -l < "$reference_index") référence(s) avec Album ou GPS."
+
+echo -e "\e[34mIndexation des sources...\e[0m"
+build_index true "${source_paths[@]}" > "$source_index"
+undated_count=$(( $(list_files "${source_paths[@]}" | wc -l) - $(wc -l < "$source_index") ))
+[ "$undated_count" -gt 0 ] && echo -e "\e[33m$undated_count source(s) sans date ignorée(s).\e[0m"
+
+matched=0
+unmatched=0
+already_tagged=0
+while IFS=$'\037' read -r epoch file current_album current_latitude _; do
+    echo
+    if [ -n "$current_album" ] && [ -n "$current_latitude" ]; then
+        echo -e "\e[34m$(basename "$file") -> déjà taggé (Album et GPS), ignoré\e[0m"
+        already_tagged=$((already_tagged + 1))
+        continue
+    fi
+
+    match=$(find_closest_reference "$epoch")
+    if [ -z "$match" ]; then
+        echo -e "\e[33m$(basename "$file") -> aucune référence à moins de ${max_gap_hours}h\e[0m"
+        unmatched=$((unmatched + 1))
+        continue
+    fi
+
+    IFS=$'\037' read -r gap _ reference album latitude longitude <<< "$match"
+    echo -e "\e[32m$(basename "$file")\e[0m -> similaire à \e[32m$(basename "$reference")\e[0m (écart $(format_gap "$gap"))"
+
+    edit_args=()
+    if [ -z "$current_latitude" ] && [ -n "$latitude" ] && [ -n "$longitude" ]; then
+        echo "  Location : $latitude,$longitude"
+        if is_quicktime "$file"; then
+            edit_args+=(--GPSCoordinates "$latitude, $longitude")
+        else
+            edit_args+=(--GPSLatitude "$latitude" --GPSLatitudeRef "$latitude" --GPSLongitude "$longitude" --GPSLongitudeRef "$longitude")
+        fi
+    fi
+    if [ -z "$current_album" ] && [ -n "$album" ]; then
+        echo "  Album : $album"
+        edit_args+=(--Album "$album")
+    fi
+    if [ ${#edit_args[@]} -eq 0 ]; then
+        echo "  Rien à ajouter (tags déjà présents ou absents de la référence)."
+        continue
+    fi
+    [ "$dry_run" = true ] && edit_args+=(--dry-run)
+
+    "$BATCH_EDIT_EXIF" "$file" "${edit_args[@]}"
+    matched=$((matched + 1))
+done < "$source_index"
+
+echo
+echo -e "Terminé : \e[32m$matched retaggé(s)\e[0m, \e[33m$unmatched sans correspondance\e[0m, \e[34m$already_tagged déjà taggé(s)\e[0m."
