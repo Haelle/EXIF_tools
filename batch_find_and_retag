@@ -129,6 +129,7 @@ while IFS=$'\037' read -r epoch file current_album current_latitude _; do
 
     IFS=$'\037' read -r gap _ reference album latitude longitude <<< "$match"
     echo -e "\e[32m$(basename "$file")\e[0m -> similaire à \e[32m$(basename "$reference")\e[0m (écart $(format_gap "$gap"))"
+    echo "  Référence : $(realpath "$reference")"
 
     edit_args=()
     if [ -z "$current_latitude" ] && [ -n "$latitude" ] && [ -n "$longitude" ]; then

@@ -52,6 +52,12 @@ Or copy directly from the photo with exiftool (no dry-run):
 exiftool -overwrite_original -tagsFromFile photo.jpg '-GPSCoordinates<GPSPosition' videos/*.mp4
 ```
 
+And bonus ; erase Album value
+
+```sh
+exiftool -overwrite_original -Album= photo.jpg
+```
+
 ## Organize by EXIF
 
 A script to sort file by EXIF, inspired by [elodie](https://github.com/jmathai/elodie).
@@ -65,3 +71,40 @@ This command change the datetime of all file in the directory based on the filen
 ```sh
 exiftool -overwrite_original '-DateTimeOriginal<${Filename;m/^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/$1:$2:$3 $4:$5:$6/}' .
 ```
+
+## Compress videos
+
+Re-encode with a modern codec at constant quality (CRF): lower CRF = better quality, bigger file. `-fps_mode passthrough` keeps the variable frame rate of phone videos (otherwise frames get duplicated). `-map_metadata 0 -movflags +use_metadata_tags` keeps dates but not GPS: copy it back with exiftool (see below).
+
+H.265/HEVC (≈ -50% vs H.264, plays almost everywhere except Firefox), CRF 23 to 26:
+
+```sh
+ffmpeg -i input.mp4 -c:v libx265 -crf 23 -preset slow -tag:v hvc1 -c:a copy -fps_mode passthrough -map_metadata 0 -movflags +use_metadata_tags output.mp4
+```
+
+AV1 (best compression, recent devices and browsers), CRF 30 to 36:
+
+```sh
+ffmpeg -i input.mp4 -c:v libsvtav1 -crf 30 -preset 6 -c:a copy -fps_mode passthrough -map_metadata 0 -movflags +use_metadata_tags output.mp4
+```
+
+Copy GPS back from the original:
+
+```sh
+exiftool -overwrite_original -tagsFromFile input.mp4 -GPSCoordinates output.mp4
+```
+
+Compare quality with the original (SSIM, ≥ 0.98 is close to invisible). Frames are matched by index because variable frame rate timestamps don't align:
+
+```sh
+ffmpeg -i output.mp4 -i input.mp4 -lavfi "[0:v]settb=1/30,setpts=N[a];[1:v]settb=1/30,setpts=N[b];[a][b]ssim" -f null -
+```
+
+Results on a 1080p 14 Mb/s phone video (174 MB):
+
+| Config              | Size  | Gain | SSIM  |
+| ------------------- | ----- | ---- | ----- |
+| H.265 CRF 23 slow   | 89 MB | -49% | 0.983 |
+| H.265 CRF 26 medium | 50 MB | -72% | 0.975 |
+| AV1 CRF 30          | 61 MB | -65% | 0.984 |
+| AV1 CRF 36          | 38 MB | -78% | 0.980 |
