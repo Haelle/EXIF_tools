@@ -74,6 +74,15 @@ exiftool -overwrite_original '-DateTimeOriginal<${Filename;m/^(\d{4})(\d{2})(\d{
 
 ## Compress videos
 
+`compress_videos` re-encodes every video of a folder (recursively) in AV1 (CPU or GPU), replaces the originals, skips videos already in HEVC/AV1, keeps dates, GPS and Album. Run `./compress_videos --help` for options and quality equivalences between encoders.
+
+```sh
+./compress_videos --source ~/Videos
+./compress_videos --source ~/Videos --gpu nvidia --quality-nvenc 32
+```
+
+Manual commands:
+
 Re-encode with a modern codec at constant quality (CRF): lower CRF = better quality, bigger file. `-fps_mode passthrough` keeps the variable frame rate of phone videos (otherwise frames get duplicated). `-map_metadata 0 -movflags +use_metadata_tags` keeps dates but not GPS: copy it back with exiftool (see below).
 
 H.265/HEVC (≈ -50% vs H.264, plays almost everywhere except Firefox), CRF 23 to 26:

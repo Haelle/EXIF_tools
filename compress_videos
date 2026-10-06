@@ -1,0 +1,254 @@
+#!/bin/bash
+
+display_help() {
+    echo "Usage: $0 --source <fichiers/dossiers> [--gpu nvidia|intel|vaapi] [--quality-<encodeur> <n>] [--help]"
+    echo
+    echo "Compresse toutes les vidéos (sous-dossiers inclus) en AV1, ou en HEVC si le GPU ne gère pas l'AV1."
+    echo "Les fichiers d'origine sont remplacés (sortie en .mp4). Les vidéos déjà en HEVC ou AV1 sont ignorées."
+    echo "Les dates, le GPS et les tags XMP (Album) sont conservés."
+    echo
+    echo "Options:"
+    echo "  --source <paths...>       Fichiers ou dossiers à compresser (wildcards autorisés)."
+    echo "  --gpu <type>              Encode sur GPU : nvidia (NVENC), intel (QSV) ou vaapi (AMD, Intel). Défaut : CPU (SVT-AV1)."
+    echo "  --quality-crf <n>         CPU, CRF SVT-AV1 (0-63). Défaut : $DEFAULT_QUALITY_CRF."
+    echo "  --quality-nvenc <n>       --gpu nvidia, -cq (0-51, AV1 et HEVC). Défaut : AV1 $DEFAULT_QUALITY_NVENC_AV1, HEVC $DEFAULT_QUALITY_NVENC_HEVC."
+    echo "  --quality-qsv <n>         --gpu intel, -global_quality (1-51). Défaut : AV1 $DEFAULT_QUALITY_QSV_AV1, HEVC $DEFAULT_QUALITY_QSV_HEVC."
+    echo "  --quality-vaapi <n>       --gpu vaapi, -global_quality (AV1 0-255, HEVC 0-52). Défaut : AV1 $DEFAULT_QUALITY_VAAPI_AV1, HEVC $DEFAULT_QUALITY_VAAPI_HEVC."
+    echo "  --help                    Affiche cette aide."
+    echo
+    echo "Qualité : plus bas = meilleure qualité, fichier plus gros. Valeurs approximativement équivalentes"
+    echo "(les encodeurs GPU sont moins efficaces : à qualité égale, fichier 20-40% plus gros) :"
+    echo
+    echo "  Rendu                  CRF (CPU)  NVENC AV1/HEVC  QSV AV1/HEVC  VAAPI AV1/HEVC"
+    echo "  Quasi identique        30         26 / 23         24 / 22       100 / 22"
+    echo "  Équilibré (défaut)     36         32 / 28         30 / 26       128 / 26"
+    echo "  Petit, perte visible   42         38 / 32         36 / 30       160 / 30"
+    echo
+    echo "  Seule la ligne CRF a été mesurée (vidéo 1080p de téléphone : CRF 36 = -78%, SSIM 0.980)."
+    echo "  Les valeurs GPU sont des estimations : testez sur une vidéo et comparez à l'oeil."
+    exit 0
+}
+
+DEFAULT_QUALITY_CRF=36
+DEFAULT_QUALITY_NVENC_AV1=32
+DEFAULT_QUALITY_NVENC_HEVC=28
+DEFAULT_QUALITY_QSV_AV1=30
+DEFAULT_QUALITY_QSV_HEVC=26
+DEFAULT_QUALITY_VAAPI_AV1=128
+DEFAULT_QUALITY_VAAPI_HEVC=26
+VIDEO_EXTENSIONS_REGEX='.*\.(mp4|mov|m4v|3gp|mkv|avi|mts)$'
+SKIPPED_CODECS_REGEX='^(hevc|av1)$'
+MP4_AUDIO_CODECS_REGEX='^(aac|mp3|opus|alac)$'
+VAAPI_DEVICE=/dev/dri/renderD128
+
+source_paths=()
+gpu=""
+declare -A quality_by_device
+
+while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+        --source) shift; while [[ "$#" -gt 0 && "$1" != --* ]]; do source_paths+=("$1"); shift; done ;;
+        --gpu) gpu="$2"; shift 2 ;;
+        --quality-crf) quality_by_device[cpu]="$2"; shift 2 ;;
+        --quality-nvenc) quality_by_device[nvidia]="$2"; shift 2 ;;
+        --quality-qsv) quality_by_device[intel]="$2"; shift 2 ;;
+        --quality-vaapi) quality_by_device[vaapi]="$2"; shift 2 ;;
+        -h|--help) display_help ;;
+        *) echo "Option inconnue : $1"; display_help ;;
+    esac
+done
+
+if [ ${#source_paths[@]} -eq 0 ]; then
+    echo -e "\e[31mErreur : --source est obligatoire.\e[0m"
+    display_help
+fi
+
+for device in "${!quality_by_device[@]}"; do
+    if [ "$device" != "${gpu:-cpu}" ]; then
+        echo -e "\e[31mErreur : l'option de qualité pour '$device' ne correspond pas à l'encodeur choisi (${gpu:-cpu}).\e[0m"
+        exit 1
+    fi
+done
+
+for tool in ffmpeg ffprobe exiftool; do
+    if ! command -v "$tool" &> /dev/null; then
+        echo -e "\e[31m$tool n'est pas installé.\e[0m"
+        exit 1
+    fi
+done
+
+encoder_works() {
+    ffmpeg -hide_banner -loglevel error "${input_args[@]}" -f lavfi -i color=s=256x256:d=0.1 \
+        "${filter_args[@]}" -c:v "$1" -f null - &> /dev/null
+}
+
+select_encoder() {
+    local av1_encoder hevc_encoder quality default_quality_name
+    input_args=()
+    filter_args=()
+    case "$gpu" in
+        "")
+            encoder=libsvtav1; codec=AV1
+            encoder_args=(-c:v libsvtav1 -preset 6 -crf "${quality_by_device[cpu]:-$DEFAULT_QUALITY_CRF}")
+            return
+            ;;
+        nvidia) av1_encoder=av1_nvenc; hevc_encoder=hevc_nvenc ;;
+        intel) av1_encoder=av1_qsv; hevc_encoder=hevc_qsv ;;
+        vaapi)
+            av1_encoder=av1_vaapi; hevc_encoder=hevc_vaapi
+            input_args=(-vaapi_device "$VAAPI_DEVICE")
+            filter_args=(-vf "format=nv12,hwupload")
+            ;;
+        *) echo -e "\e[31mGPU inconnu : $gpu (nvidia, intel ou vaapi).\e[0m"; exit 1 ;;
+    esac
+
+    if encoder_works "$av1_encoder"; then
+        encoder=$av1_encoder; codec=AV1
+    elif encoder_works "$hevc_encoder"; then
+        encoder=$hevc_encoder; codec=HEVC
+    else
+        echo -e "\e[31mAucun encodeur GPU $gpu fonctionnel ($av1_encoder, $hevc_encoder).\e[0m"
+        exit 1
+    fi
+
+    case "$gpu" in
+        nvidia) default_quality_name="DEFAULT_QUALITY_NVENC_$codec" ;;
+        intel) default_quality_name="DEFAULT_QUALITY_QSV_$codec" ;;
+        vaapi) default_quality_name="DEFAULT_QUALITY_VAAPI_$codec" ;;
+    esac
+    quality="${quality_by_device[$gpu]:-${!default_quality_name}}"
+
+    case "$gpu" in
+        nvidia) encoder_args=(-c:v "$encoder" -preset p7 -tune hq -rc vbr -cq "$quality" -b:v 0) ;;
+        intel) encoder_args=(-c:v "$encoder" -preset veryslow -global_quality "$quality") ;;
+        vaapi) encoder_args=("${filter_args[@]}" -c:v "$encoder" -rc_mode CQP -global_quality "$quality") ;;
+    esac
+    [ "$codec" = HEVC ] && encoder_args+=(-tag:v hvc1)
+}
+
+probe() {
+    ffprobe -v error -select_streams "$1" -show_entries "stream=codec_name" -of csv=p=0 "$2" 2>/dev/null | head -1
+}
+
+format_mb() {
+    awk -v bytes="$1" 'BEGIN { printf "%.1f Mo", bytes / 1048576 }'
+}
+
+compression_rate() {
+    awk -v before="$1" -v after="$2" 'BEGIN { printf "%.0f", (1 - after / before) * 100 }'
+}
+
+select_encoder
+echo -e "\e[34mEncodeur : $encoder ($codec), ${encoder_args[*]}\e[0m"
+
+temp_file=""
+trap '[ -n "$temp_file" ] && rm -f "$temp_file"; echo; exit 130' INT TERM
+
+echo -e "\e[34mAnalyse des vidéos...\e[0m"
+files_to_compress=()
+durations=()
+total_duration=0
+while IFS= read -r -d '' file; do
+    video_codec=$(probe v:0 "$file")
+    if [[ "$video_codec" =~ $SKIPPED_CODECS_REGEX ]]; then
+        echo -e "\e[33mIgnoré (déjà en $video_codec) : $file\e[0m"
+        continue
+    fi
+    if [ -z "$video_codec" ]; then
+        echo -e "\e[33mIgnoré (pas de flux vidéo) : $file\e[0m"
+        continue
+    fi
+    duration=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$file" 2>/dev/null)
+    [[ "$duration" =~ ^[0-9.]+$ ]] || duration=0
+    files_to_compress+=("$file")
+    durations+=("$duration")
+    total_duration=$(awk -v a="$total_duration" -v b="$duration" 'BEGIN { print a + b }')
+done < <(find "${source_paths[@]}" -type f -regextype posix-extended -iregex "$VIDEO_EXTENSIONS_REGEX" -print0 2>/dev/null | sort -zu)
+
+file_count=${#files_to_compress[@]}
+echo -e "\e[34m$file_count vidéo(s) à compresser ($(awk -v d="$total_duration" 'BEGIN { printf "%dh%02dm", d / 3600, d % 3600 / 60 }') au total).\e[0m"
+
+done_duration=0
+total_before=0
+total_after=0
+failed=0
+
+for index in "${!files_to_compress[@]}"; do
+    file="${files_to_compress[$index]}"
+    duration="${durations[$index]}"
+    target="${file%.*}.mp4"
+    temp_file="${file%.*}.compressing.mp4"
+    error_log=$(mktemp)
+
+    echo
+    echo -e "\e[34m[$((index + 1))/$file_count]\e[0m $file"
+
+    if [ "$target" != "$file" ] && [ -e "$target" ]; then
+        echo -e "\e[31m  Ignoré : $target existe déjà.\e[0m"
+        failed=$((failed + 1))
+        done_duration=$(awk -v a="$done_duration" -v b="$duration" 'BEGIN { print a + b }')
+        continue
+    fi
+
+    audio_args=(-c:a copy)
+    audio_codec=$(probe a:0 "$file")
+    if [ -n "$audio_codec" ] && ! [[ "$audio_codec" =~ $MP4_AUDIO_CODECS_REGEX ]]; then
+        audio_args=(-c:a aac -b:a 128k)
+    fi
+
+    ffmpeg -hide_banner -loglevel error -nostdin -y "${input_args[@]}" -i "$file" \
+        "${encoder_args[@]}" "${audio_args[@]}" \
+        -fps_mode passthrough -map_metadata 0 -movflags +use_metadata_tags \
+        -progress pipe:1 -nostats "$temp_file" 2> "$error_log" \
+        | awk -F= -v duration="$duration" -v done="$done_duration" -v total="$total_duration" '
+            $1 == "out_time_us" && $2 ~ /^[0-9]+$/ {
+                position = $2 / 1000000
+                file_percent = duration > 0 ? position / duration * 100 : 0
+                global_percent = total > 0 ? (done + position) / total * 100 : 0
+                if (file_percent > 100) file_percent = 100
+                printf "\r  Fichier : %5.1f%%   Global : %5.1f%%", file_percent, global_percent
+                fflush()
+            }
+            $1 == "progress" && $2 == "end" && total > 0 {
+                printf "\r  Fichier : %5.1f%%   Global : %5.1f%%", 100, (done + duration) / total * 100
+            }'
+    ffmpeg_status=${PIPESTATUS[0]}
+    echo
+    done_duration=$(awk -v a="$done_duration" -v b="$duration" 'BEGIN { print a + b }')
+
+    if [ "$ffmpeg_status" -ne 0 ] || [ ! -s "$temp_file" ]; then
+        echo -e "\e[31m  Échec de l'encodage, original conservé :\e[0m"
+        sed 's/^/    /' "$error_log"
+        rm -f "$temp_file" "$error_log"
+        failed=$((failed + 1))
+        continue
+    fi
+    rm -f "$error_log"
+
+    exiftool -q -q -overwrite_original -tagsFromFile "$file" -GPSCoordinates -XMP:all "$temp_file"
+    touch -r "$file" "$temp_file"
+
+    size_before=$(stat -c%s "$file")
+    size_after=$(stat -c%s "$temp_file")
+    if [ "$size_after" -ge "$size_before" ]; then
+        echo -e "\e[33m  Pas de gain ($(format_mb "$size_before") -> $(format_mb "$size_after")), original conservé.\e[0m"
+        rm -f "$temp_file"
+        continue
+    fi
+
+    mv "$temp_file" "$target"
+    [ "$target" != "$file" ] && rm -f "$file"
+    temp_file=""
+    total_before=$((total_before + size_before))
+    total_after=$((total_after + size_after))
+    echo -e "\e[32m  $(format_mb "$size_before") avant, $(format_mb "$size_after") après : -$(compression_rate "$size_before" "$size_after")%\e[0m"
+done
+
+echo
+if [ "$total_before" -gt 0 ]; then
+    echo -e "\e[32mTerminé : $(format_mb "$total_before") avant, $(format_mb "$total_after") après : -$(compression_rate "$total_before" "$total_after")%\e[0m"
+else
+    echo -e "\e[33mTerminé : aucune vidéo compressée.\e[0m"
+fi
+[ "$failed" -gt 0 ] && echo -e "\e[31m$failed échec(s), voir les logs ci-dessus.\e[0m"
+exit 0
