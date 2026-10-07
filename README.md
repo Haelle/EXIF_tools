@@ -74,7 +74,7 @@ exiftool -overwrite_original '-DateTimeOriginal<${Filename;m/^(\d{4})(\d{2})(\d{
 
 ## Compress videos
 
-`compress_videos` re-encodes every video of a folder (recursively) in AV1 (CPU or GPU), replaces the originals, skips videos already in HEVC/AV1, keeps dates, GPS and Album. Run `./compress_videos --help` for options and quality equivalences between encoders.
+`compress_videos` re-encodes every video of a folder (recursively) in AV1 (CPU or GPU) next to the originals with the codec in the name (`video.mov` -> `video.av1.mp4`), deletes the originals with `--delete-original`, overwrites existing outputs with `-y`, skips videos already in HEVC/AV1, keeps dates, GPS and Album. Run `./compress_videos --help` for options and quality equivalences between encoders.
 
 ```sh
 ./compress_videos --source ~/Videos

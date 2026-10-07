@@ -1,10 +1,11 @@
 #!/bin/bash
 
 display_help() {
-    echo "Usage: $0 --source <fichiers/dossiers> [--gpu nvidia|intel|vaapi] [--quality-<encodeur> <n>] [--help]"
+    echo "Usage: $0 --source <fichiers/dossiers> [--gpu nvidia|intel|vaapi] [--quality-<encodeur> <n>] [--delete-original] [-y|-n] [--help]"
     echo
     echo "Compresse toutes les vidéos (sous-dossiers inclus) en AV1, ou en HEVC si le GPU ne gère pas l'AV1."
-    echo "Les fichiers d'origine sont remplacés (sortie en .mp4). Les vidéos déjà en HEVC ou AV1 sont ignorées."
+    echo "La sortie est écrite à côté de l'original avec le codec dans le nom (video.mov -> video.av1.mp4)."
+    echo "Les vidéos déjà en HEVC ou AV1 sont ignorées."
     echo "Les dates, le GPS et les tags XMP (Album) sont conservés."
     echo
     echo "Options:"
@@ -14,6 +15,9 @@ display_help() {
     echo "  --quality-nvenc <n>       --gpu nvidia, -cq (0-51, AV1 et HEVC). Défaut : AV1 $DEFAULT_QUALITY_NVENC_AV1, HEVC $DEFAULT_QUALITY_NVENC_HEVC."
     echo "  --quality-qsv <n>         --gpu intel, -global_quality (1-51). Défaut : AV1 $DEFAULT_QUALITY_QSV_AV1, HEVC $DEFAULT_QUALITY_QSV_HEVC."
     echo "  --quality-vaapi <n>       --gpu vaapi, -global_quality (AV1 0-255, HEVC 0-52). Défaut : AV1 $DEFAULT_QUALITY_VAAPI_AV1, HEVC $DEFAULT_QUALITY_VAAPI_HEVC."
+    echo "  --delete-original         Supprime l'original après une compression réussie. Défaut : il est conservé."
+    echo "  -y                        Écrase le fichier de sortie s'il existe déjà."
+    echo "  -n                        Ignore la vidéo si le fichier de sortie existe déjà (défaut)."
     echo "  --help                    Affiche cette aide."
     echo
     echo "Qualité : plus bas = meilleure qualité, fichier plus gros. Valeurs approximativement équivalentes"
@@ -43,16 +47,21 @@ VAAPI_DEVICE=/dev/dri/renderD128
 
 source_paths=()
 gpu=""
+delete_original=false
+overwrite_output=false
 declare -A quality_by_device
 
 while [[ "$#" -gt 0 ]]; do
     case "$1" in
-        --source) shift; while [[ "$#" -gt 0 && "$1" != --* ]]; do source_paths+=("$1"); shift; done ;;
+        --source) shift; while [[ "$#" -gt 0 && "$1" != -* ]]; do source_paths+=("$1"); shift; done ;;
         --gpu) gpu="$2"; shift 2 ;;
         --quality-crf) quality_by_device[cpu]="$2"; shift 2 ;;
         --quality-nvenc) quality_by_device[nvidia]="$2"; shift 2 ;;
         --quality-qsv) quality_by_device[intel]="$2"; shift 2 ;;
         --quality-vaapi) quality_by_device[vaapi]="$2"; shift 2 ;;
+        --delete-original) delete_original=true; shift ;;
+        -y) overwrite_output=true; shift ;;
+        -n) overwrite_output=false; shift ;;
         -h|--help) display_help ;;
         *) echo "Option inconnue : $1"; display_help ;;
     esac
@@ -176,16 +185,15 @@ failed=0
 for index in "${!files_to_compress[@]}"; do
     file="${files_to_compress[$index]}"
     duration="${durations[$index]}"
-    target="${file%.*}.mp4"
+    target="${file%.*}.${codec,,}.mp4"
     temp_file="${file%.*}.compressing.mp4"
     error_log=$(mktemp)
 
     echo
     echo -e "\e[34m[$((index + 1))/$file_count]\e[0m $file"
 
-    if [ "$target" != "$file" ] && [ -e "$target" ]; then
-        echo -e "\e[31m  Ignoré : $target existe déjà.\e[0m"
-        failed=$((failed + 1))
+    if [ -e "$target" ] && [ "$overwrite_output" = false ]; then
+        echo -e "\e[33m  Ignoré : $target existe déjà (-y pour l'écraser).\e[0m"
         done_duration=$(awk -v a="$done_duration" -v b="$duration" 'BEGIN { print a + b }')
         continue
     fi
@@ -237,7 +245,7 @@ for index in "${!files_to_compress[@]}"; do
     fi
 
     mv "$temp_file" "$target"
-    [ "$target" != "$file" ] && rm -f "$file"
+    [ "$delete_original" = true ] && rm -f "$file"
     temp_file=""
     total_before=$((total_before + size_before))
     total_after=$((total_after + size_after))
