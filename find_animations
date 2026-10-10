@@ -1,0 +1,265 @@
+#!/bin/bash
+
+display_help() {
+    echo "Usage: $0 --source <fichiers/dossiers> --destination <dossier> [options] [--dry-run] [--help]"
+    echo
+    echo "Détecte les séries de photos prises à la suite (même appareil, même cadrage) et génère"
+    echo "une animation WebP par série, en pleine résolution, pour review. Les originaux ne sont pas modifiés."
+    echo
+    echo "Options:"
+    echo "  --source <paths...>      Photos à analyser (jpg, jpeg, png ; wildcards autorisés)."
+    echo "  --destination <dossier>  Dossier où écrire les animations."
+    echo "  --max-step <s>           Écart maximum entre deux photos consécutives (défaut : $DEFAULT_MAX_STEP s)."
+    echo "  --max-span <s>           Durée maximum d'une série (défaut : $DEFAULT_MAX_SPAN s)."
+    echo "  --min-photos <n>         Nombre minimum de photos par série (défaut : $DEFAULT_MIN_PHOTOS)."
+    echo "  --similarity <%>         Différence maximum entre deux photos consécutives, 0-100 (défaut : $DEFAULT_SIMILARITY)."
+    echo "                           Plus bas = plus strict. La différence est affichée dans les logs pour ajuster."
+    echo "  --delay <ms>             Durée d'affichage de chaque photo (défaut : $DEFAULT_DELAY ms)."
+    echo "  --quality <n>            Qualité WebP 0-100 (défaut : $DEFAULT_QUALITY)."
+    echo "  --max-resolution <r>     Réduit le petit côté des photos, comme une résolution vidéo (défaut : pleine résolution)."
+    echo "                           720p, 1080p, 1440p (ou 2K), 2160p (ou 4K), ou <n>p. Voir les tailles types ci-dessous."
+    echo "  --dry-run                Affiche les séries détectées sans générer les animations."
+    echo "  --help                   Affiche cette aide."
+    echo
+    echo "Tailles types avec --max-resolution (poids par photo de la série, scène simple / scène très détaillée) :"
+    echo
+    echo "  Résolution   Photo 6000x4000 (3:2)   Photo 4000x3000 (4:3)   Poids par photo   Usage"
+    echo "  1080p        1620x1080               1440x1080               0.1 - 0.7 Mo      Mattermost, WhatsApp"
+    echo "  2K           2160x1440               1920x1440               0.2 - 1.2 Mo      Écran, Immich"
+    echo "  4K           3240x2160               2880x2160               0.3 - 2.5 Mo      Archivage, zoom"
+    echo "  (aucune)     6000x4000               4000x3000               0.5 - 5 Mo        Pleine résolution"
+    echo
+    echo "  Mesuré avec --quality $DEFAULT_QUALITY sur 2 séries (4000x3000 et 4000x2256) ; la pleine résolution 6000x4000 est estimée."
+    echo "  Ex. une série de 5 photos en 1080p : 0.5 à 3.5 Mo."
+    exit 0
+}
+
+export LC_NUMERIC=C
+
+DEFAULT_MAX_STEP=30
+DEFAULT_MAX_SPAN=120
+DEFAULT_MIN_PHOTOS=3
+DEFAULT_SIMILARITY=20
+DEFAULT_DELAY=400
+DEFAULT_QUALITY=75
+PHOTO_EXTENSIONS_REGEX='.*\.(jpg|jpeg|png)$'
+THUMBNAIL_SIZE=64x64
+COLORED_PIXEL_CHROMA=10%
+MIN_COLORED_PIXELS_RATIO=0.007
+
+source_paths=()
+destination=""
+max_step=$DEFAULT_MAX_STEP
+max_span=$DEFAULT_MAX_SPAN
+min_photos=$DEFAULT_MIN_PHOTOS
+similarity=$DEFAULT_SIMILARITY
+delay=$DEFAULT_DELAY
+quality=$DEFAULT_QUALITY
+max_resolution=""
+dry_run=false
+
+while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+        --source) shift; while [[ "$#" -gt 0 && "$1" != --* ]]; do source_paths+=("$1"); shift; done ;;
+        --destination) destination="$2"; shift 2 ;;
+        --max-step) max_step="$2"; shift 2 ;;
+        --max-span) max_span="$2"; shift 2 ;;
+        --min-photos) min_photos="$2"; shift 2 ;;
+        --similarity) similarity="$2"; shift 2 ;;
+        --delay) delay="$2"; shift 2 ;;
+        --quality) quality="$2"; shift 2 ;;
+        --max-resolution) max_resolution="$2"; shift 2 ;;
+        --dry-run) dry_run=true; shift ;;
+        -h|--help) display_help ;;
+        *) echo "Option inconnue : $1"; display_help ;;
+    esac
+done
+
+if [ ${#source_paths[@]} -eq 0 ] || [ -z "$destination" ]; then
+    echo -e "\e[31mErreur : --source et --destination sont obligatoires.\e[0m"
+    display_help
+fi
+
+resize_args=()
+if [ -n "$max_resolution" ]; then
+    case "${max_resolution,,}" in
+        2k) short_side=1440 ;;
+        4k) short_side=2160 ;;
+        *p) short_side="${max_resolution%[pP]}" ;;
+        *) short_side="" ;;
+    esac
+    if ! [[ "$short_side" =~ ^[0-9]+$ ]]; then
+        echo -e "\e[31mErreur : --max-resolution invalide : $max_resolution (ex. 1080p, 2K, 4K).\e[0m"
+        exit 1
+    fi
+    resize_args=(-resize "${short_side}x${short_side}^>")
+fi
+
+for tool in exiftool jq convert compare img2webp; do
+    if ! command -v "$tool" &> /dev/null; then
+        echo -e "\e[31m$tool n'est pas installé.\e[0m"
+        exit 1
+    fi
+done
+
+work_dir=$(mktemp -d)
+trap 'rm -rf "$work_dir"' EXIT
+
+# Outputs fields separated by \037 (not tab: bash read merges consecutive tabs): epoch, file, camera, width, height, sorted by camera then date
+build_index() {
+    find "${source_paths[@]}" -type f -regextype posix-extended -iregex "$PHOTO_EXTENSIONS_REGEX" 2>/dev/null | sort -u \
+        | exiftool -@ - -j -q -d '%Y %m %d %H %M %S' \
+            -DateTimeOriginal -Make -Model -ImageWidth -ImageHeight '-Orientation#' \
+        | jq -r '
+            .[]
+            | select(.DateTimeOriginal | type == "string" and test("^[0-9]{4} "))
+            | (if (.Orientation // 1) >= 5 then [.ImageHeight, .ImageWidth] else [.ImageWidth, .ImageHeight] end) as $size
+            | [.DateTimeOriginal, .SourceFile, "\(.Make // "") \(.Model // "")", $size[0], $size[1]] | join("\u001f")' \
+        | awk -F '\037' -v OFS='\037' '{ $1 = mktime($1); print }' \
+        | sort -t $'\037' -k3,3 -k1,1n
+}
+
+color_mode() {
+    local colored_ratio
+    colored_ratio=$(convert -define jpeg:size=256x256 "$1" -thumbnail 128x128 -colorspace HCL -channel G -separate +channel \
+        -threshold "$COLORED_PIXEL_CHROMA" -format '%[fx:mean]' info:)
+    awk -v ratio="$colored_ratio" -v min="$MIN_COLORED_PIXELS_RATIO" 'BEGIN { print (ratio >= min ? "couleur" : "N/B") }'
+}
+
+# Appends the color mode (couleur, N/B, or - for photos with no same-camera neighbour within max_step) and sorts by camera, mode, date
+add_color_mode() {
+    local epoch file camera width height has_neighbour
+    awk -F '\037' -v OFS='\037' -v max_step="$max_step" '
+        { line[NR] = $0; epoch[NR] = $1; camera[NR] = $3 }
+        END {
+            for (i = 1; i <= NR; i++) {
+                near_previous = i > 1 && camera[i - 1] == camera[i] && epoch[i] - epoch[i - 1] <= max_step
+                near_next = i < NR && camera[i + 1] == camera[i] && epoch[i + 1] - epoch[i] <= max_step
+                print line[i], (near_previous || near_next)
+            }
+        }' \
+    | while IFS=$'\037' read -r epoch file camera width height has_neighbour; do
+        mode="-"
+        [ "$has_neighbour" = 1 ] && mode=$(color_mode "$file")
+        printf '%s\037%s\037%s\037%s\037%s\037%s\n' "$epoch" "$file" "$camera" "$width" "$height" "$mode"
+    done \
+    | sort -t $'\037' -k3,3 -k6,6 -k1,1n
+}
+
+thumbnail_of() {
+    local thumbnail
+    thumbnail="$work_dir/thumbnails/$(echo "$1" | md5sum | cut -d' ' -f1).png"
+    if [ ! -f "$thumbnail" ]; then
+        mkdir -p "$work_dir/thumbnails"
+        convert -define jpeg:size=256x256 "$1" -auto-orient -colorspace gray -thumbnail "$THUMBNAIL_SIZE!" "$thumbnail"
+    fi
+    echo "$thumbnail"
+}
+
+difference_percent() {
+    compare -metric RMSE "$(thumbnail_of "$1")" "$(thumbnail_of "$2")" null: 2>&1 \
+        | sed -E 's/.*\(([0-9.e-]+)\).*/\1/' | awk '{ printf "%.0f", $1 * 100 }'
+}
+
+format_mb() {
+    awk -v bytes="$1" 'BEGIN { printf "%.1f Mo", bytes / 1048576 }'
+}
+
+series_files=()
+series_logs=()
+series_start=0
+series_count=0
+generated_count=0
+
+generate_animation() {
+    local first="${series_files[0]}"
+    local span=$1
+    local name output frames_dir index frame img2webp_args
+    name="$(date -d "@$series_start" +%Y-%m-%d_%H%M%S)_${#series_files[@]}photos.webp"
+    output="$destination/$name"
+
+    echo
+    echo -e "\e[32mSérie $series_mode de ${#series_files[@]} photos sur ${span}s\e[0m -> $name"
+    printf '%s\n' "${series_logs[@]}"
+
+    [ "$dry_run" = true ] && return
+    if [ -e "$output" ]; then
+        echo -e "\e[33m  Ignoré : $output existe déjà.\e[0m"
+        return
+    fi
+
+    frames_dir="$work_dir/frames"
+    mkdir -p "$frames_dir" "$destination"
+    img2webp_args=(-loop 0 -lossy -q "$quality" -d "$delay")
+    for index in "${!series_files[@]}"; do
+        frame="$frames_dir/$index.png"
+        convert "${series_files[$index]}" -auto-orient "${resize_args[@]}" -quality 10 "$frame"
+        img2webp_args+=("$frame")
+    done
+
+    if img2webp "${img2webp_args[@]}" -o "$output" > /dev/null 2> "$work_dir/error.log"; then
+        exiftool -q -q -overwrite_original -tagsFromFile "$first" \
+            -DateTimeOriginal -CreateDate -Make -Model -GPS:all -XMP:Album "$output"
+        echo -e "  \e[32mGénéré : $(format_mb "$(stat -c%s "$output")")\e[0m"
+        generated_count=$((generated_count + 1))
+    else
+        echo -e "  \e[31mÉchec de img2webp :\e[0m"
+        sed 's/^/    /' "$work_dir/error.log"
+        rm -f "$output"
+    fi
+    rm -rf "$frames_dir"
+}
+
+flush_series() {
+    local last_epoch=$1
+    if [ ${#series_files[@]} -ge "$min_photos" ]; then
+        series_count=$((series_count + 1))
+        generate_animation $((last_epoch - series_start))
+    fi
+    series_files=()
+    series_logs=()
+}
+
+echo -e "\e[34mIndexation des photos...\e[0m"
+build_index | add_color_mode > "$work_dir/index"
+echo "$(wc -l < "$work_dir/index") photo(s) datée(s)."
+
+previous_epoch=0
+previous_file=""
+previous_key=""
+while IFS=$'\037' read -r epoch file camera width height mode; do
+    key="$camera|$mode|${width}x$height"
+    step=$((epoch - previous_epoch))
+    if [ ${#series_files[@]} -gt 0 ] && [ "$key" = "$previous_key" ] \
+        && [ "$step" -le "$max_step" ] && [ $((epoch - series_start)) -le "$max_span" ]; then
+        difference=$(difference_percent "$previous_file" "$file")
+        if [ "$difference" -le "$similarity" ]; then
+            series_files+=("$file")
+            series_logs+=("  $(basename "$file")  +${step}s  différence ${difference}%")
+        else
+            [ ${#series_files[@]} -ge 2 ] && echo -e "\e[33mSérie coupée avant $(basename "$file") : différence ${difference}% > ${similarity}%\e[0m"
+            flush_series "$previous_epoch"
+            series_start=$epoch
+            series_mode=$mode
+            series_files=("$file")
+            series_logs=("  $(basename "$file")  début  ($(dirname "$file"))")
+        fi
+    else
+        flush_series "$previous_epoch"
+        series_start=$epoch
+        series_mode=$mode
+        series_files=("$file")
+        series_logs=("  $(basename "$file")  début  ($(dirname "$file"))")
+    fi
+    previous_epoch=$epoch
+    previous_file=$file
+    previous_key=$key
+done < "$work_dir/index"
+flush_series "$previous_epoch"
+
+echo
+if [ "$dry_run" = true ]; then
+    echo -e "\e[34mTerminé : $series_count série(s) détectée(s) (dry run).\e[0m"
+else
+    echo -e "\e[32mTerminé : $series_count série(s) détectée(s), $generated_count animation(s) générée(s) dans $destination.\e[0m"
+fi
